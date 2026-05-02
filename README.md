@@ -242,7 +242,7 @@ In a regime of sub-millisecond budgets, building this in a garbage-collected lan
 2. **Security branch** sends a shadow copy to Layer 2.
 3. **Kill switch.** If the security branch returns a violation while the LLM is still streaming, the proxy sends a TCP RST to kill the connection before the malicious response reaches the agent.
 
-> **Architectural note (post-2026-05-02).** The current shipped behaviour is **security-first, not race-to-veto**: the proxy awaits the security verdict before forking upstream. Earlier commits raced security against upstream via `tokio::select!`, which left a side-effect window for yellow-tier tools (a wire transfer would have fired before HITL approval). The original race architecture remains in pre-2026-05-02 git history if it ever needs to come back. The fail-closed semantic is preserved trivially — upstream is only called on `Authorized` or HITL-`Approved`.
+> **Architectural note (post-2026-05-02).** The current shipped behaviour is **security-first, not race-to-veto**: the proxy awaits the security verdict before forking upstream. Earlier commits raced security against upstream via `tokio::select!`, which left a side-effect window for yellow-tier tools (a wire transfer would have fired before HIL approval). The original race architecture remains in pre-2026-05-02 git history if it ever needs to come back. The fail-closed semantic is preserved trivially — upstream is only called on `Authorized` or HIL-`Approved`.
 
 ### MCP-native protocol support
 
@@ -382,7 +382,7 @@ allow {
 
 - **Temporal access control** — *e.g.*, no bulk exports outside 09:00–17:00 UTC.
 - **Cost-aware circuit breakers** — `input.estimated_cost` exceeding the project's daily budget returns `allow = false`.
-- **HITL router** — high-risk actions (`delete_user`, `wire_transfer`) return `status: "PENDING_HUMAN"`, triggering a Slack/Teams approval card.
+- **HIL router** — high-risk actions (`delete_user`, `wire_transfer`) return `status: "PENDING_HUMAN"`, triggering a Slack/Teams approval card.
 
 ### 8.4 Why OPA scales
 
@@ -436,21 +436,21 @@ Recursive reasoning loops. A bug or attacker triggers an agent to retry an impos
 
 ## 10. Human-in-the-loop orchestrator
 
-The HITL orchestrator is the bridge between autonomous efficiency and human accountability. As agents move from "suggesting" to "executing," there are points of no return where the risk is too high for a machine to decide alone.
+The HIL orchestrator is the bridge between autonomous efficiency and human accountability. As agents move from "suggesting" to "executing," there are points of no return where the risk is too high for a machine to decide alone.
 
 ### 10.1 Conditional agency — tri-state logic
 
 Beyond binary allow/deny:
 
 - **Green (automatic)** — low-risk: read public docs, draft internal email.
-- **Yellow (HITL required)** — high-impact: execute wire transfer, delete customer record, change production firewall.
+- **Yellow (HIL required)** — high-impact: execute wire transfer, delete customer record, change production firewall.
 - **Red (hard block)** — forbidden: exfiltrate PII, recursive-loop detected.
 
-A yellow-tier action suspends the agent's execution state and triggers the HITL workflow.
+A yellow-tier action suspends the agent's execution state and triggers the HIL workflow.
 
 ### 10.2 Multi-channel approval
 
-To prevent Warden becoming a bottleneck, HITL meets humans where they already work:
+To prevent Warden becoming a bottleneck, HIL meets humans where they already work:
 
 - **Slack / MS Teams.** A rich-text card to a designated channel; admin clicks **Approve**, **Deny**, or **Modify**.
 - **Mobile push.** Biometric-verified (FaceID/TouchID) push for critical-infra agents — the CISO authorises on the go.
@@ -458,7 +458,7 @@ To prevent Warden becoming a bottleneck, HITL meets humans where they already wo
 
 ### 10.3 Sandbox simulator (pre-approval visualization)
 
-For complex DevOps actions, HITL provides a **dry run**: the proposed code is executed in an isolated shadow environment and the human sees the *delta* — exactly what will change if they click approve. This eliminates blind approvals.
+For complex DevOps actions, HIL provides a **dry run**: the proposed code is executed in an isolated shadow environment and the human sees the *delta* — exactly what will change if they click approve. This eliminates blind approvals.
 
 ### 10.4 Behavioural learning
 
@@ -466,9 +466,9 @@ If a human approves the same yellow action 50 times in a row, Warden suggests a 
 
 > *"You have approved 50/50 'refunds under $50' requests. Automate this for agent ID `support-bot-3`?"*
 
-The HITL orchestrator becomes an adaptive governance layer that evolves with the company's risk appetite.
+The HIL orchestrator becomes an adaptive governance layer that evolves with the company's risk appetite.
 
-### 10.5 HITL state machine
+### 10.5 HIL state machine
 
 | Feature                | Technology                   | Benefit                                                        |
 |------------------------|------------------------------|----------------------------------------------------------------|
@@ -477,7 +477,7 @@ The HITL orchestrator becomes an adaptive governance layer that evolves with the
 | Audit trail            | Digital signature            | Cryptographically links human approval to AI action           |
 | TTL                    | Configurable (e.g. 10 min)   | Stale actions time out safely                                  |
 
-> The HITL orchestrator is the antidote to executive fear. By showing leaders a dashboard where they retain the final say over every critical lever, you remove the largest barrier to enterprise AI adoption.
+> The HIL orchestrator is the antidote to executive fear. By showing leaders a dashboard where they retain the final say over every critical lever, you remove the largest barrier to enterprise AI adoption.
 
 ---
 
@@ -526,7 +526,7 @@ For any company deploying autonomous agents in high-risk categories (recruitment
 
 - **Explainable intervention.** Warden translates JSON-RPC tool calls into plain language so a human reviewer understands *why* the agent is asking for permission.
 - **Stop-button requirement (14(4)).** The proxy can sever the agent's connection to its tools and LLM in <1 ms — the legally required hard stop.
-- **Automation-bias mitigation.** HITL admins must review a delta report showing exactly what will change before approval, defeating "click yes from habit."
+- **Automation-bias mitigation.** HIL admins must review a delta report showing exactly what will change before approval, defeating "click yes from habit."
 
 ### 12.2 Article 15 — accuracy, robustness, cybersecurity
 
@@ -544,7 +544,7 @@ For any company deploying autonomous agents in high-risk categories (recruitment
 
 ### 12.4 Certificate of compliance
 
-Warden generates the technical file (Article 11) automatically, proves HITL checkpoints exist (Article 14), and provides logs of resistance to 1,000+ simulated injection attacks (Article 15).
+Warden generates the technical file (Article 11) automatically, proves HIL checkpoints exist (Article 14), and provides logs of resistance to 1,000+ simulated injection attacks (Article 15).
 
 > **The shift in burden of proof.** When the regulator knocks, you do not show them a black-box LLM — you show a Warden audit trail proving control the entire time.
 
@@ -777,7 +777,7 @@ The 2026 M&A landscape is characterised by **platformisation** — buyers are ex
 
 ### 18.3 Enterprise operating systems
 
-- **ServiceNow.** Acquired Armis; running massive Agentforce fleets that are huge liability risks. **Fit:** Warden's HITL orchestrator is the *gavel of control* their enterprise customers demand.
+- **ServiceNow.** Acquired Armis; running massive Agentforce fleets that are huge liability risks. **Fit:** Warden's HIL orchestrator is the *gavel of control* their enterprise customers demand.
 - **Databricks.** Launched Lakewatch (agentic SIEM); acquired Antimatter for AI authorization. **Fit:** Warden's forensic ledger is the regulatory layer Databricks needs to prove how data was used by agents.
 
 ### 18.4 Exit matrix — 2026 prediction
@@ -879,15 +879,15 @@ This document is the strategic plan. The actual implementation lives in sibling 
 | 2     | `warden-brain`           | 8081  | Three-signal eval (intent, persona drift, indirect injection)          |
 | 3     | `warden-policy-engine`   | 8082  | Pure-Rust Rego (regorus); pluggable velocity tracker (in-proc / NATS-KV) |
 | 4     | `warden-ledger`          | 8083  | SHA-256 hash-chained, SQLite-backed, NATS subscriber, `/verify` API     |
-| —     | `warden-hitl`            | 8084  | Pending → Approved/Denied/Expired state machine for yellow tier        |
+| —     | `warden-hil`            | 8084  | Pending → Approved/Denied/Expired state machine for yellow tier        |
 
 Test & GTM repos: `warden-core-e2e` (full-stack runner), `warden-chaos-monkey` (red-team CLI), `warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`, `warden-website`.
 
 Notable deviations from the original spec:
 
-- **Security-first, not race-to-veto.** The proxy awaits the security verdict before forking upstream. The original `tokio::select!` race architecture left a side-effect window for yellow-tier actions (a wire transfer fired before HITL approval). The race architecture remains in pre-2026-05-02 git history if it is ever needed back.
+- **Security-first, not race-to-veto.** The proxy awaits the security verdict before forking upstream. The original `tokio::select!` race architecture left a side-effect window for yellow-tier actions (a wire transfer fired before HIL approval). The race architecture remains in pre-2026-05-02 git history if it is ever needed back.
 - **Brain runs raw HTTP with prompt caching wired** — there is no Rust Anthropic SDK, so the "anthropic-sdk migration" item resolved as raw-HTTP plus caching.
 - **Brain and policy run serially today** despite the fork module name. Parallelising is gated on Brain becoming side-effect-free (Voyage embeddings + indirect-injection Haiku call live there).
 - **Velocity tracker has two backends** — in-process `HashMap` (default) and NATS-KV (JetStream KV bucket, JSON-encoded ms timestamps, CAS update loop). Selected via `WARDEN_VELOCITY_BACKEND={in-process|nats-kv}`.
 
-**Open Tier-3 hardening backlog:** real Apache Iceberg metadata + native `aws-sdk-s3` sink for ledger export; HITL modify-and-resume + WebAuthn approver auth + sandbox simulator; SQLite vacuum after export; chain-version negotiation.
+**Open Tier-3 hardening backlog:** real Apache Iceberg metadata + native `aws-sdk-s3` sink for ledger export; HIL modify-and-resume + WebAuthn approver auth + sandbox simulator; SQLite vacuum after export; chain-version negotiation.
