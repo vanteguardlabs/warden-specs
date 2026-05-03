@@ -941,7 +941,7 @@ This document is the strategic plan. The actual implementation lives in sibling 
 | 4     | `warden-ledger`          | 8083  | SHA-256 hash-chained, SQLite-backed, NATS subscriber, `/verify` API     |
 | —     | `warden-hil`            | 8084  | Pending → Approved/Denied/Expired state machine for yellow tier        |
 
-Test & GTM repos: `warden-core-e2e` (full-stack runner), `warden-chaos-monkey` (red-team CLI), `warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`, `warden-website`.
+Test & GTM repos: `warden-e2e` (full-stack runner), `warden-chaos-monkey` (red-team CLI), `warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`, `warden-website`.
 
 Notable deviations from the original spec:
 
