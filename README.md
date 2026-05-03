@@ -28,8 +28,9 @@ The control plane for the agentic enterprise: a zero-trust security, governance,
 17. [24-month roadmap to acquisition](#17-24-month-roadmap-to-acquisition)
 18. [M&A targets & exit strategy](#18-ma-targets--exit-strategy)
 19. [Risk management & operational resilience](#19-risk-management--operational-resilience)
-20. [Conclusion: the trust dividend](#20-conclusion-the-trust-dividend)
-21. [Implementation status](#21-implementation-status)
+20. [The next horizon: wow factors for 2026–2027](#20-the-next-horizon-wow-factors-for-20262027)
+21. [Conclusion: the trust dividend](#21-conclusion-the-trust-dividend)
+22. [Implementation status](#22-implementation-status)
 
 ---
 
@@ -838,7 +839,66 @@ For the no-fail tolerances FDIC and BaFin require in 2026, Warden ships a **sema
 
 ---
 
-## 20. Conclusion: the trust dividend
+## 20. The next horizon: wow factors for 2026–2027
+
+The shipped stack secures the agentic perimeter. The next three modules turn that perimeter into something competitors structurally cannot match: a **time machine** for policy decisions, a **collective immune system** that compounds across customers, and a **financial product** that converts forensic evidence into priced risk transfer.
+
+These three are not feature adds on top of an existing category — each pulls Warden into a different category entirely (developer tooling, threat intelligence, insurance), and each is uniquely enabled by what the four-layer stack already produces.
+
+### 20.1 Counterfactual policy replay — the time-travel CISO
+
+Every Rego rule deployed today carries the same fear: *will this break a workflow we depend on?* The current answer is "deploy to staging and pray." The hash-chained forensic ledger makes a better answer possible.
+
+**Mechanism.** A draft policy is registered against a replay window (default: last 90 days). The policy engine re-evaluates each historical `PolicyInput` from the ledger using only the new rule, producing a counterfactual decision per row. Because the ledger preserves the full input — agent id, intent score, `current_time`, `recent_request_count`, sandbox report — the replay is byte-deterministic against past traffic. No staging environment, no synthetic load, no guessing.
+
+**Output.** A diff report:
+
+> *Rule `no_finance_after_hours` would have changed 142 verdicts in the last 90 days. 138 deny — correct (all from `support-bot-3` querying invoice DB at 22:00 UTC). 4 deny — false positive (agent `treasury-1` running scheduled reconciliation, exempt). Recommend deploy with `treasury-1` allowlist.*
+
+**Why competitors can't.** Stateless gateways have no replayable history. Append-only logs without canonical input capture lose the exact bytes the policy engine consumed. Warden's chain version negotiation and structured `hashable` row already preserve everything the replay needs — the feature is a thin engine on top of existing forensic substrate.
+
+**Customer pull.** Eliminates the largest unmodelled cost of policy-as-code: deployment fear. A CISO who can backtest a rule before shipping it ships ten times more rules per quarter — which directly improves catch rate on novel attacks.
+
+### 20.2 Warden Collective — federated threat intelligence
+
+Every Warden customer sees attacks. No customer sees them all. Today that intelligence stays siloed; the Collective makes it compound.
+
+**Mechanism.** Customers opt in to share *signatures only* — never payloads. Published artifacts: one-way-hashed prompt-injection patterns, normalised tool-hopping graphs, persona-drift embedding clusters. Privacy floors enforced by construction: k-anonymity (k ≥ 25 distinct tenants must independently observe a signature before publication), differential-privacy budget per signature class, no raw token sharing, customer-side opt-out per category. The brain ingests the catalog and pre-loads matching detectors at the edge.
+
+**Output.** A second feed alongside customer-local Rego:
+
+> *INJ-2027-04-21-A: this indirect-injection pattern was attempted at 47 peer organisations in the last 24h. 41 caught at Layer 2; 6 reached Layer 3 and were caught by velocity. Suggested Rego rule attached, validated against your last 30 days of traffic with zero false positives. Deploy?*
+
+**Privacy posture.** The Collective is described in the master subscription agreement; legal review by design-partner counsel is part of rollout. No signature is published from a single customer's traffic. Cross-tenant clustering happens in a Warden-operated TEE so even Warden engineers see only the published aggregate.
+
+**Network effect — the moat.** The 50th customer makes the 1st customer measurably safer. Hyperscalers cannot copy this without abandoning their multi-tenant platform-separation guarantees — they have the data but not the contractual permission to cross-publish. Every new logo lifts the value of every existing logo, which is the precise dynamic that justified CrowdStrike's threat-graph valuation premium.
+
+> *Pitch line: CrowdStrike's threat graph for AI agents.*
+
+### 20.3 Insured by Warden — risk transfer as product
+
+The forensic ledger is already legally admissible. The next leap is to make it *underwritable*.
+
+**The partnership.** Cyber-insurance carriers (Coalition, At-Bay, AXA, Munich Re's HSB) currently price AI-incident coverage as a guess — they have no telemetry of how an enterprise's agents actually behave. Warden's hash-chained ledger plus weekly chaos-monkey resilience certificate plus continuous policy posture is exactly the signal carriers are missing.
+
+**The product.** Warden customers receive automated underwriting reports: agent inventory, tool-access risk grade, HIL coverage of yellow tier, mean time to detect simulated injection, percentage of yellow-tier requests with sandbox preview reviewed before approval. A partner carrier consumes this report and offers a binding quote — typically **30–50% below the unsecured baseline**, because the carrier's loss-ratio model has signal it has never had before.
+
+**Revenue model.** Brokerage fee on bound policies (15–20% per industry standard) plus ARR uplift on the customer subscription (the carrier mandates Warden as a coverage condition, making it non-removable). At 50 enterprise customers each placing a $5M annual cyber-AI rider, this single line crosses **$5M ARR within 18 months** — and lifts every other Warden line item.
+
+| Signal Warden provides         | What carriers price on today    | What they can price on with Warden |
+|--------------------------------|----------------------------------|-------------------------------------|
+| Agent tool-permission posture  | Self-attested questionnaire     | Attested telemetry, signed daily    |
+| Injection resistance           | Headlines, news of breaches     | Weekly chaos-monkey certificate     |
+| Time-to-contain a rogue agent  | Theoretical                     | Median <1 ms (cert revocation)      |
+| Forensic evidence post-loss    | Best-effort log scrape          | SHA-256-chained, court-grade        |
+
+**Strategic reframe.** Warden stops being a security purchase ("we should have this") and becomes a **financial purchase** ("we save 40% on cyber premiums and shift residual risk to a carrier that contractually pays out"). Board-level narrative, not CISO-level. The same forensic chain that satisfies the EU AI Act now also satisfies an underwriter — one substrate, two regulated buyers.
+
+> *The trust dividend, monetised: when an AI breach is no longer a question of "if" but "who pays," Warden is the system of record both sides agree to trust.*
+
+---
+
+## 21. Conclusion: the trust dividend
 
 2026 marks the end of the experimentation phase. We have entered the **production era**, where the AI success metric is no longer just intelligence but **agency** — the ability to act, decide, persist. With agentic traffic growing at over 7,800% year-over-year, leaders have realised existing security models are fundamentally broken.
 
@@ -869,7 +929,7 @@ Warden evolves from security gateway into the **universal AI operating system**:
 
 ---
 
-## 21. Implementation status
+## 22. Implementation status
 
 This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-03, all four phases of the build plan, Tier-2 GTM, and the Tier-3 hardening backlog are shipped. Re-verify with `git log` per repo before relying on any specific claim.
 
