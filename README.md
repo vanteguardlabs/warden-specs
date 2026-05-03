@@ -871,7 +871,7 @@ Warden evolves from security gateway into the **universal AI operating system**:
 
 ## 21. Implementation status
 
-This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-02, all four phases of the build plan are shipped and Tier-2 GTM is closed. Re-verify with `git log` per repo before relying on any specific claim.
+This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-03, all four phases of the build plan, Tier-2 GTM, and the Tier-3 hardening backlog are shipped. Re-verify with `git log` per repo before relying on any specific claim.
 
 | Layer | Repo                    | Port  | Role                                                                  |
 |-------|--------------------------|-------|------------------------------------------------------------------------|
@@ -890,4 +890,4 @@ Notable deviations from the original spec:
 - **Brain and policy run serially today** despite the fork module name. Parallelising is gated on Brain becoming side-effect-free (Voyage embeddings + indirect-injection Haiku call live there).
 - **Velocity tracker has two backends** — in-process `HashMap` (default) and NATS-KV (JetStream KV bucket, JSON-encoded ms timestamps, CAS update loop). Selected via `WARDEN_VELOCITY_BACKEND={in-process|nats-kv}`.
 
-**Open Tier-3 hardening backlog:** real Apache Iceberg metadata + native `aws-sdk-s3` sink for ledger export; HIL modify-and-resume + WebAuthn approver auth + sandbox simulator; SQLite vacuum after export; chain-version negotiation.
+**Tier-3 hardening — shipped 2026-05-02 → 2026-05-03:** HIL modify-and-resume (WG-301); explicit chain-version negotiation (WG-302); opt-in post-export SQLite vacuum with append-only chain_vacuum_cursor (WG-303); native `aws-sdk-s3` sink + real Apache Iceberg v2 metadata on every ledger export (WG-305); pure-Rust sandbox simulator wired through proxy → HIL → console (WG-306); WebAuthn approver auth — HIL backend + console proxy + e2e bootstrap (WG-401a/b/c). No items currently open at this layer; hardening continues opportunistically rather than from a backlog.
