@@ -507,6 +507,8 @@ In the internet of agents, bots talk to other bots. The biggest gap is **agent s
 - **Digital signatures for actions.** Every email sent or row deleted is signed by Warden — non-repudiation, legal proof of which agent did what under whose authority.
 - **Capability attestation.** Before touching a sensitive tool, an agent must present a hardware-backed certificate (TPM/SGX) proving its code has not been tampered with since deployment.
 
+> **Operational spec:** [`IDENTITY.md`](./IDENTITY.md) is the engineering-side companion — wire shapes, phase rollout, threat catalog, fallback semantics. Read it before changing identity-touching code.
+
 ### 11.4 Strategic roadmap impact (2026–2028)
 
 | Extension          | Audience              | Primary metric        | Valuation impact |
