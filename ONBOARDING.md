@@ -453,7 +453,7 @@ Onboarding scenarios are pure-identity, no policy-tracker hits, so they run earl
 |---|---|---|
 | Console → Identity (read) | `GET /agents` response shape | `warden-console`, `warden-identity/src/agents.rs`, `warden-sdk` |
 | Console → Identity (write) | `POST /agents` and lifecycle bodies | `warden-console`, `warden-identity/src/agents.rs`, `warden-sdk` |
-| `wardenctl` → Identity | All `/agents` shapes | `warden-sdk`, `wardenctl/src/cmd/agents.rs`, `warden-identity/src/agents.rs` |
+| `wardenctl` → Identity | All `/agents` shapes | `warden-sdk`, `warden-ctl/src/cmd/agents.rs`, `warden-identity/src/agents.rs` |
 | Identity → Ledger (NATS) | Chain v3 outer hashable + per-kind payloads | `warden-identity/src/agents_ledger.rs`, `warden-ledger/src/chain.rs` (v3 dispatch), `warden-ledger/src/verify.rs` |
 | Identity → Proxy/HIL (existing rejection signals) | New error codes (`unregistered_agent`, `scope_outside_envelope`, `agent_suspended`, `agent_decommissioned`, `attestation_kind_not_accepted`) | `warden-proxy/src/grant.rs`, `warden-proxy/src/sign.rs` (signal aggregator), `warden-brain` (signal display), `warden-console/src/audit.rs` (filter chips) |
 
