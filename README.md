@@ -634,39 +634,64 @@ We do not sell to the first 10 — we co-build. Free six-month license traded fo
 
 ## 15. Pricing & revenue model
 
-Flat-fee SaaS fails to capture explosive agentic volume. The **hybrid multiplier model** combines a recurring floor with usage-scaled ceilings.
+Pricing is a **discrete SKU ladder anchored on the active agent**, not a flat-fee floor with a per-token tax bolted on. The active agent (a registered SVID with an envelope in WAO that has executed at least one tool call in the last 30 days) is the unit of risk *and* the unit of value, so it is also the unit of meter. Token volume rides inside the seat as a fair-use cap; only overage is metered. One dominant axis = one negotiation, not two.
 
-### 15.1 Three tiers
+### 15.1 SKU ladder
 
-**A. Platform core — subscription floor.** $50K – $250K / year (by enterprise size). Covers Rust ingress proxy, OPA policy engine, forensic ledger, SOC2 / EU AI Act dashboard. Predictable ARR.
+| SKU             | Annual base | Agents incl. | Agent overage     | Token fair-use      | Includes                                                                                                  |
+|-----------------|-------------|--------------|-------------------|---------------------|-----------------------------------------------------------------------------------------------------------|
+| **Lite (OSS)**  | Free        | ≤3           | —                 | 1M tok/agent/mo     | Heuristic brain, basic Rego, hash-chain ledger, single binary. No HIL, no custom Rego, no federation.     |
+| **Team**        | $36K        | 25           | $180/agent/mo     | 10M tok/agent/mo    | Full proxy, Rego authoring, ledger, simulator, console. Self-serve. No HIL workflows, no compliance export. |
+| **Enterprise**  | $180K       | 100          | $140/agent/mo     | 10M tok/agent/mo    | Team + HIL queues, WAO onboarding, identity federation, attestation enforcement, Iceberg cold tier, SSO, SIEM streaming. |
+| **Sovereign**   | +$250K      | per quote    | per quote         | per quote           | Enterprise + dedicated tenancy, customer-held HSM keys, EU AI Act + SOC2 + HIPAA attestation pack, named SRE, region-locked data plane. |
 
-**B. Active-agent seat — growth lever.** $50 – $200 / month per high-agency bot (one with permission to execute tool calls — DB writes, wire transfers). As a customer scales 10 → 1,000 agents, revenue scales without a new sales cycle.
+The ladder is intentionally discrete — ranges (e.g. the prior "$50K – $250K") are negotiation traps; rungs aren't. Lite is the funnel; Team is self-serve / SMB; Enterprise is where regulated buyers (FinTech, health, B2B SaaS — see §14.1) land; Sovereign is the JPMC/UnitedHealth/EU public-sector premium.
 
-**C. Semantic tax — usage multiplier.** $0.01 per 1,000 tokens inspected. Covers Layer 2 inference cost. The win-win: dynamic routing typically saves clients $0.05 per 1,000 tokens by moving tasks to cheaper models — Warden pays for itself.
+**Token overage** beyond the fair-use cap meters at $0.005 per 1,000 inspected tokens — half the prior "semantic tax." It only kicks in on traffic-heavy outliers, so it does not surface in the standard procurement conversation.
 
-### 15.2 Revenue multipliers — high-value add-ons
+### 15.2 Why single-axis metering
 
-- **Red Team subscription (+20%)** — weekly automated stress-testing.
-- **Compliance Export (+15%)** — one-click EU AI Act audit filing with cryptographically signed reasoning logs.
-- **Shadow AI Hunter (+10%)** — continuous corporate-network scanning for unsecured agents.
+The earlier draft of this section combined a subscription floor, a per-agent seat, *and* a $0.01-per-1K-token "semantic tax." Two-axis metering reliably triggers procurement pushback and forces customers to forecast traffic they can't predict. Folding the inspection cost into the seat (with a fair-use cap) means the customer signs for headcount, not for a token forecast — and Warden still captures the volume scaling because customer agent counts grow at agentic-volume CAGR (~300%), not slower.
 
-### 15.3 The self-funding pitch (CFO ROI)
+### 15.3 Add-ons — flat dollars, not percentage uplifts
+
+Percentage uplifts compound unpredictably across SKUs and break finance team modeling. Flat dollars sell.
+
+- **Red Team subscription** — **$30K/yr.** Weekly automated stress-testing via the chaos-monkey catalog.
+- **Compliance Export** — **$60K/yr.** One-click EU AI Act Article 14/15 filing with cryptographically signed reasoning logs (chain v3). Highest willingness-to-pay item in the catalog — it deletes ~2 FTE lawyers per §15.6.
+- **Shadow AI Hunter** — **bundled free** in Enterprise and above. It is a top-of-funnel conversion tool, not a revenue line; charging for it slows the wedge.
+
+### 15.4 Indemnified breach SLA
+
+A premium SKU the prior draft did not have. **From $500K/yr.** Warden indemnifies up to $5M per incident if the hash-chained ledger demonstrates an action *should have* been blocked by a policy that was deployed and healthy at the time of the incident. The chain v3 + per-action signing + attestation enforcement already shipped make this underwritable: the ledger is the evidence, the signatures are non-repudiation, the attestation cache proves which policy version was live.
+
+This is the only line item that unlocks **board-level** budget rather than CISO-level budget. Acquirers (Palo Alto, CrowdStrike, Wiz/Google) pay materially higher multiples on indemnified ARR than on operational ARR — so this SKU is also the single biggest lever on §15.7 exit value.
+
+### 15.5 Land-and-expand math
+
+| Stage           | SKU + add-ons                                    | Agents | Annualized   |
+|-----------------|--------------------------------------------------|--------|--------------|
+| Land (month 0)  | Team                                              | 25     | $36K         |
+| Expand (month 12)| Enterprise + Compliance Export                  | 100    | $240K        |
+| Expand (month 24)| Enterprise + Compliance + Sovereign + SLA       | 500    | ~$1.1M       |
+
+A single customer on this trajectory hits the 140% NRR claim in §15.7 by themselves — the rest of the book is upside. Per §14.3, the wedge is one high-risk workflow on Team; Enterprise lands when WAO enrollment crosses ~50 agents; Sovereign + SLA close when the customer first hits a regulated-tier deployment (typically a wire-transfer or PHI workflow).
+
+### 15.6 The self-funding pitch (CFO ROI)
 
 | Expense          | Without Warden                | With Warden                   | Saving            |
 |------------------|-------------------------------|-------------------------------|-------------------|
 | Model spend      | $100,000 (pure GPT-5)         | $60,000 (hybrid routing)      | $40,000 saved     |
 | Recursive loops  | $10,000 (avg waste)           | $0 (kill switch)              | $10,000 saved     |
 | Compliance staff | 2 FTE lawyers                 | 0.25 admin                    | $250,000 saved    |
-| Warden cost      | —                              | $25,000 (subscription + use)  | ($25,000) cost    |
-| **Net result**   | High risk, high cost          | Low risk, low cost            | **$275,000+ ROI** |
+| Warden cost      | —                             | $36,000 (Team SKU)            | ($36,000) cost    |
+| **Net result**   | High risk, high cost          | Low risk, low cost            | **$264,000+ ROI** |
 
-### 15.4 Strategic exit value — the multiplier effect
+The ROI gap *widens* on Enterprise — Compliance Export at $60K replaces materially more than 2 FTE lawyers once EU AI Act Article 14/15 filings are in steady state.
 
-Acquirers measure **net revenue retention**. Warden is sticky (it holds the API keys and compliance logs); agentic volume grows at 300% CAGR. Projected NRR is 140%+ — even with no new customers signed, revenue grows 40% per year as existing customers deploy more bots.
+### 15.7 Strategic exit value — the multiplier effect
 
-### 15.5 The free-to-start wedge
-
-**Warden Lite.** Free for up to 3 agents. Feature-limited (no custom Rego policies) but includes basic PII redaction and injection protection. Goal: capture developer mindshare so when the project hits production, Warden is already the baked-in default.
+Acquirers measure **net revenue retention**. Warden is sticky (it holds the API keys, the SVIDs, and the compliance logs); agentic volume grows at 300% CAGR. Projected NRR is 140%+ — even with no new customers signed, revenue grows 40% per year as existing customers deploy more bots. The Indemnified Breach SLA in §15.4 is the multiplier on top of NRR: indemnified contracts trade at a premium to operational ones at exit.
 
 ---
 
