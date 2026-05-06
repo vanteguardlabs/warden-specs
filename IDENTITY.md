@@ -2,7 +2,7 @@
 
 Companion spec to `README.md` §11.3 ("Agent identity — IAM for bots"). Scoped to what §11.3 commits to and grounded in the primitives Warden already ships (NATS forensic bus, hash-chained ledger, HIL, `regorus` policy engine).
 
-**Module status:** new, Tier 3 hardening backlog. Touches `warden-proxy`, `warden-policy-engine`, `warden-ledger`, `warden-hil`, and introduces a new service `warden-identity` (port 8086, candidate).
+**Module status:** **shipped** (P0–P5). Touches `warden-proxy`, `warden-policy-engine`, `warden-ledger`, `warden-hil`; introduced the `warden-identity` service (port 8086). The companion onboarding spec `ONBOARDING.md` (WAO P1–P5, also shipped) layers the agent-registry / lifecycle / capability-envelope work on top of these primitives.
 
 ## 1. What §11.3 actually commits to
 
@@ -212,15 +212,15 @@ Console (`warden-console`) needs a "Delegation: alice@acme via support-bot-3" ba
 
 ## 9. Migration & rollout
 
-Five phases, each independently shippable:
+Five phases, each independently shippable. **All five shipped.**
 
-1. **SVID issuance, no enforcement.** `warden-identity` mints SVIDs alongside the existing CA. Proxy logs both `cn` and parsed `spiffe_id`. No behaviour change. *Exit:* 100% of simulator traffic carries SPIFFE SAN.
-2. **Delegation grants.** `/grant` exchange wired; proxy *accepts* but does not *require* grants. HIL surfaces `act.sub` when present. *Exit:* console shows human principal on ≥80% of Yellow-tier rows.
-3. **Action signing (chain v2).** Ledger gains v2 dispatch. Proxy starts requesting `/sign`. Verifier exposes per-row signature check. *Exit:* `verify_chain` passes against a mixed v1/v2 export.
-4. **Attestation enforcement.** Policy Engine gains `attestation_required` rule kind. Allowlist starts narrow (just `wire_transfer`, `delete_*`). *Exit:* chaos-monkey gains an "unattested-binary" scenario that gets denied.
-5. **Cross-tenant federation.** SPIFFE bundle endpoint exposed; A2A actor-tokens accepted from federated trust domains. *Exit:* two-tenant integration test in `warden-e2e`.
+1. **SVID issuance, no enforcement.** *(shipped)* `warden-identity` mints SVIDs alongside the existing CA. Proxy parses the SPIFFE SAN from the cert and falls back to CN for legacy clients.
+2. **Delegation grants.** *(shipped)* `/grant` exchange wired; HIL records the delegation principal on pending rows; proxy threads `X-Warden-Grant` through and rejects expired grants with `grant_expired`.
+3. **Action signing (chain v2).** *(shipped)* Ledger gained v2 dispatch (`HashableEntryV2` with `agent_spiffe`, `signature`, `key_id`); proxy calls `/sign` after the verdict resolves; verifier exposes JWKS-based per-row signature check; mixed-v1/v2 export verifies.
+4. **Attestation enforcement.** *(shipped)* `policies/attestation.rego` ships with `attestation_required` rules keyed on `wire_transfer` and `delete_*`; `attestation_allowlist.json` carries the per-tool measurement list; proxy attaches `AttestationClaims` (with a per-spiffe-id cache and `X-Warden-Attestation` per-request header override) on every `/evaluate`; chaos-monkey `unattested_binary` asserts deny.
+5. **Cross-tenant federation.** *(shipped)* SPIFFE bundle endpoint at `GET /.well-known/spiffe-bundle`; `/actor-token` mint + `/actor-token/redeem` with peer-bundle freshness gate (`peer_bundle_unknown:<td>` / `peer_bundle_stale:<td>`); federation poller; two-tenant `run-federation.sh` e2e in `warden-e2e`.
 
-Phases 1–3 unblock the §15 trust-dividend story (non-repudiable logs). Phases 4–5 unblock the §11.3 valuation claim (⭐⭐⭐⭐⭐, "zero-trust score" metric).
+The §11.3 valuation claim (⭐⭐⭐⭐⭐, "zero-trust score" metric) and the §15 trust-dividend story are both unblocked.
 
 ## 10. Test surface
 

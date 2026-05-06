@@ -933,7 +933,7 @@ Warden evolves from security gateway into the **universal AI operating system**:
 
 ## 22. Implementation status
 
-This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-03, all four phases of the build plan, Tier-2 GTM, and the Tier-3 hardening backlog are shipped. Re-verify with `git log` per repo before relying on any specific claim.
+This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-06, all four phases of the build plan, Tier-2 GTM, identity P0–P5 (incl. P4 attestation enforcement), and WAO (Warden Agent Onboarding) P1–P5 are shipped. Re-verify with `git log` per repo before relying on any specific claim.
 
 | Layer | Repo                    | Port  | Role                                                                  |
 |-------|--------------------------|-------|------------------------------------------------------------------------|
@@ -941,9 +941,10 @@ This document is the strategic plan. The actual implementation lives in sibling 
 | 2     | `warden-brain`           | 8081  | Three-signal eval (intent, persona drift, indirect injection)          |
 | 3     | `warden-policy-engine`   | 8082  | Pure-Rust Rego (regorus); pluggable velocity tracker (in-proc / NATS-KV) |
 | 4     | `warden-ledger`          | 8083  | SHA-256 hash-chained, SQLite-backed, NATS subscriber, `/verify` API     |
-| —     | `warden-hil`            | 8084  | Pending → Approved/Denied/Expired state machine for yellow tier        |
+| —     | `warden-hil`            | 8084  | Pending → Approved/Denied/Expired state machine for yellow tier; WebAuthn approver auth |
+| —     | `warden-identity`       | 8086  | SPIFFE SVID issuance, OIDC delegation grants, action signing, A2A actor tokens, cross-tenant federation, agent registry + lifecycle (`/agents`) gating `/svid` + `/grant` |
 
-Test & GTM repos: `warden-e2e` (full-stack runner), `warden-chaos-monkey` (red-team CLI), `warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`, `warden-website`.
+Test & GTM repos: `warden-e2e` (full-stack runner — `run.sh`, `run-stack-smoke.sh`, `run-federation.sh`, `run-onboarding.sh`), `warden-chaos-monkey` (red-team CLI), `warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-sandbox`, `warden-console`, `warden-ctl` (operator CLI), `warden-website`.
 
 Notable deviations from the original spec:
 
@@ -952,4 +953,6 @@ Notable deviations from the original spec:
 - **Brain and policy run serially today** despite the fork module name. Parallelising is gated on Brain becoming side-effect-free (Voyage embeddings + indirect-injection Haiku call live there).
 - **Velocity tracker has two backends** — in-process `HashMap` (default) and NATS-KV (JetStream KV bucket, JSON-encoded ms timestamps, CAS update loop). Selected via `WARDEN_VELOCITY_BACKEND={in-process|nats-kv}`.
 
-**Tier-3 hardening — shipped 2026-05-02 → 2026-05-03:** HIL modify-and-resume; explicit chain-version negotiation; opt-in post-export SQLite vacuum with append-only chain_vacuum_cursor; native `aws-sdk-s3` sink + real Apache Iceberg v2 metadata on every ledger export; pure-Rust sandbox simulator wired through proxy → HIL → console; WebAuthn approver auth — HIL backend + console proxy + e2e bootstrap. No items currently open at this layer; hardening continues opportunistically rather than from a backlog.
+**Tier-3 hardening — shipped 2026-05-02 → 2026-05-06:** HIL modify-and-resume; explicit chain-version negotiation (`CURRENT_CHAIN_VERSION = 3` with v1/v2/v3 dispatch); opt-in post-export SQLite vacuum with append-only `chain_vacuum_cursor`; native `aws-sdk-s3` sink + real Apache Iceberg v2 metadata on every ledger export; pure-Rust sandbox simulator wired through proxy → HIL → console; WebAuthn approver auth (HIL backend + console proxy + e2e bootstrap); `warden-ledger` `/stream/audit` SSE endpoint and nullable `signal` annotation column; identity P0–P5 — incl. P4 attestation enforcement (rego `attestation_required` + per-tool `attestation_allowlist.json` + `AttestationClaims` on `PolicyInput` + per-spiffe-id verifier cache + `X-Warden-Attestation` per-request override + chaos-monkey `unattested_binary`); WAO P1–P5 (agent registry + lifecycle in `warden-identity`, chain v3 anchoring with outbox durability, `/svid` + `/grant` gating, `enforce` mode is now the default, `wardenctl agents migrate` for legacy fleets, `run-onboarding.sh` e2e); console `/agents`, `/agents/new`, `/agents/{id}` lifecycle UI; `/config` diagnostic page (`CONFIG.md`).
+
+**Open Tier-3 backlog (per `ROADMAP.md`):** E1 OIDC + basic-admin auth modes (WebAuthn slice closed); E3 Operability Foundation; E4 Observability; E5 Supply Chain & Threat Model; E6 Regulatory Export.

@@ -4,9 +4,9 @@ Authoritative milestone plan for Tier 3 hardening. Companion to `IDENTITY.md` an
 
 ## Status (as of 2026-05-06)
 
-Phases 1-4 of the original plan: **done**. Tier 2 GTM (`warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`): **done**. Identity P0-P3 + P5 federation: **done**. WAO (Warden Agent Onboarding) P1-P5 with default flipped to `Enforce` and `wardenctl agents migrate` shipped: **done**. WebAuthn approver auth (warden-hil + warden-console, HIL holds passkey credentials, console shuttles the HIL session cookie): **done** (2026-05-03).
+Phases 1-4 of the original plan: **done**. Tier 2 GTM (`warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`): **done**. Identity P0-P5, including P4 attestation enforcement (rego `attestation_required` + per-tool measurement allowlist + per-spiffe-id verifier cache + chaos-monkey `unattested_binary`): **done**. WAO (Warden Agent Onboarding) P1-P5 with default flipped to `Enforce` and `wardenctl agents migrate` shipped: **done**. WebAuthn approver auth (warden-hil + warden-console, HIL holds passkey credentials, console shuttles the HIL session cookie): **done** (2026-05-03). Console `/config` diagnostic page (`CONFIG.md`): **done**.
 
-Active horizon: **Tier 3 — first-customer hardening**.
+Active horizon: **Tier 3 — first-customer hardening**. E1 (Human Auth Surface — WebAuthn slice) and E2 (Identity P4 Attestation Enforcement) are closed; **E3 → E6 are the open backlog.**
 
 No design partner yet. Milestones target the *median enterprise security review* — what every buyer asks regardless of vertical — rather than any specific vertical's procurement checklist. When a real design-partner appears, this roadmap will get re-shaped by their checklist; until then, optimize for optionality.
 
@@ -14,8 +14,8 @@ No design partner yet. Milestones target the *median enterprise security review*
 
 | # | Epic | Headline gap closed | Size (solo) |
 |---|------|---------------------|-------------|
-| **E1** | **Human Auth Surface** | OIDC SSO + basic-admin mode alongside the existing WebAuthn approver flow; Slack/Teams self-link; `WARDEN_CONSOLE_AUTH` selector with loopback guard. Closes the "WebAuthn is the only auth path; no enterprise SSO story" gap. | ~2 weeks |
-| **E2** | **Identity P4 — Attestation Enforcement** | Closes the explicitly-named open item in `IDENTITY.md`: `attestation_required` rego rule + per-method allowlist + chain v2 ledger dispatch + verifier cache + chaos-monkey `unattested_binary` scenario. | ~2 weeks |
+| **E1** | **Human Auth Surface** *(WebAuthn slice **shipped 2026-05-03**; OIDC + basic-admin remain open)* | OIDC SSO + basic-admin mode alongside the existing WebAuthn approver flow; Slack/Teams self-link; `WARDEN_CONSOLE_AUTH` selector with loopback guard. Closes the "WebAuthn is the only auth path; no enterprise SSO story" gap. | ~2 weeks |
+| **E2** | **Identity P4 — Attestation Enforcement** *(**shipped**)* | `attestation_required` rego rule + per-tool measurement allowlist + chain v2 ledger dispatch + per-spiffe-id verifier cache + chaos-monkey `unattested_binary` scenario, all wired through proxy → policy → ledger. | ~2 weeks |
 | **E3** | **Operability Foundation** | `/health` + `/readyz` everywhere, graceful shutdown, Dockerfile audit, per-repo GitHub Actions CI, helm chart skeleton. | ~3 weeks |
 | **E4** | **Observability** | Prometheus `/metrics` per service, OTEL tracing across the security pipeline, structured JSON logging with `correlation_id` propagation, runbook set. | ~2-3 weeks |
 | **E5** | **Supply Chain & Threat Model** | SBOM (CycloneDX) per binary, `cargo-audit` + `cargo-deny` in CI, license audit, `security.txt` + disclosure policy, public threat-model writeup. | ~2 weeks |
@@ -142,11 +142,16 @@ The bearer is the interim posture for the non-WebAuthn modes; E1.5 replaces it w
 
 These are intentionally light. The right time to design each is when the prior epic ships and we have post-implementation hindsight on what's actually expensive.
 
-### E2 — Identity P4 Attestation Enforcement
+### E2 — Identity P4 Attestation Enforcement *(shipped)*
 
-Closes the named-open item from `IDENTITY.md`. Add a rego rule `attestation_required` keyed on per-method allowlist; warden-identity gains a verifier cache for attestation evidence; warden-ledger dispatches a chain v2 row carrying the attestation kind and verifier verdict. Chaos-monkey gains an `unattested_binary` scenario asserting hard-deny.
+Closed the named-open item from `IDENTITY.md`. As shipped:
 
-Likely sub-questions to grill at design time: which attestation kinds to support in v1 (TPM-EK / SLSA / sigstore-cosign / k8s-pod-identity / static-allowlist)? Cache TTL for verified evidence? Failure mode when verifier is unreachable (fail-open vs fail-closed)? Migration path for already-registered agents that have no attestation kind on file?
+- `policies/attestation.rego` denies when `tool_type == wire_transfer` (or any `delete_*`) and the attestation is absent, expired, or carries a measurement not in `attestation_allowlist.json`. Reasons stamped on the ledger as `attestation_stale` / measurement-not-in-allowlist.
+- `PolicyInput` carries `attestation: Option<AttestationClaims>` (kind, measurement, issued_at, expires_at, nonce_echo) and `agent_spiffe`. The rule short-circuits for legacy CN-only callers — gating only fires when `agent_spiffe` is set, so chaos-monkey's `unattested_binary` scenario must mint a SPIFFE-SAN cert to be a real test.
+- The proxy carries a per-spiffe-id verifier cache; `X-Warden-Attestation` is supported as a per-request header override.
+- Chaos-monkey gained `unattested_binary` (and the related direct-to-identity onboarding-gating scenarios) asserting hard-deny.
+
+Sub-questions deferred to a follow-on: which attestation *kinds* to support in v2 beyond `dev-binary-hash` (TPM-EK / SLSA / sigstore-cosign / k8s-pod-identity); how the per-method allowlist evolves toward a Sigstore-style signed transparency log; verifier-unreachable behaviour beyond today's fail-closed posture.
 
 ### E3 — Operability Foundation
 
