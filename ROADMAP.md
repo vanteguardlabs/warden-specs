@@ -163,6 +163,8 @@ Likely sub-questions: helm chart vs raw k8s manifests vs kustomize as the canoni
 
 Prometheus `/metrics` per service: request counts, p50/p95/p99 latency, security-verdict distribution, HIL queue depth, chain length, NATS publish/subscribe rates, identity issuance rates. OpenTelemetry tracing across the security pipeline — `correlation_id` becomes a trace ID; spans for proxy → brain, proxy → policy, proxy → HIL, ledger ingest. Structured JSON logging via `tracing_subscriber` with `correlation_id` on every log line. Runbook set: "proxy crashed," "NATS down," "ledger chain invalid," "HIL queue stuck," "identity service unreachable."
 
+**Shipped slice: structured logging substrate.** Every Rust service now respects `RUST_LOG` (default `info`) and `WARDEN_LOG_FORMAT={pretty|json}` (default `pretty`). The JSON layer surfaces the active span stack so `correlation_id` flows through once spans are instrumented. Metric collection (Prometheus `/metrics`) and OTEL trace export (proxy only) were shipped earlier. Still open: extending OTEL spans to brain / policy / hil / ledger / identity, threading `correlation_id` through `tracing::Span` fields end-to-end, and the runbook set.
+
 Likely sub-questions: OTEL exporter target — OTLP / Jaeger / Tempo / vendor-specific? Metric cardinality budget (per-agent labels are tempting but explode high-cardinality). Log format — pure JSON or human-readable in dev? Runbook format — markdown in repo or Notion?
 
 ### E5 — Supply Chain & Threat Model
