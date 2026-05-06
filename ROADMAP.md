@@ -19,7 +19,7 @@ No design partner yet. Milestones target the *median enterprise security review*
 | **E3** | **Operability Foundation** | `/health` + `/readyz` everywhere, graceful shutdown, Dockerfile audit, per-repo GitHub Actions CI, helm chart skeleton. | ~3 weeks |
 | **E4** | **Observability** *(**shipped**)* | Prometheus `/metrics` per service, OTEL trace export across all six services, structured JSON logging with `correlation_id` span propagation through every request handler, on-call runbook set (`RUNBOOKS.md`). | ~2-3 weeks |
 | **E5** | **Supply Chain & Threat Model** *(**shipped**)* | SBOM (CycloneDX) per binary, `cargo-deny` (advisories + licenses + bans + sources) in CI, license audit, `security.txt` + disclosure policy, public threat-model writeup. | ~2 weeks |
-| **E6** | **Regulatory Export** | EU AI Act Article 11/12 export bundle on top of the existing chain — opt-in, signed, time-window-scoped. | ~2-3 weeks |
+| **E6** | **Regulatory Export** *(in flight; slice 1 — bundle shape — shipped 2026-05-07)* | EU AI Act Article 11/12 export bundle on top of the existing chain — opt-in, signed, time-window-scoped. Slice 1: `POST /export/regulatory?from=…&to=…` returning `.tar.gz` of NDJSON + manifest with chain pointers + sha256. Slice 2 (open): detached `manifest.sig` via warden-identity `/sign`. Slice 3 (open): operator-supplied technical-documentation README; pointers to `/export` Parquet artifacts; `wardenctl regulatory export` CLI. | ~2-3 weeks |
 | **E1.5** | **Service Mesh** *(deferred)* | Service-to-service TLS+auth between proxy, brain, policy, HIL, ledger. Deferred from E1 because the right answer (service-level mTLS via warden-identity SVIDs vs. mesh-layer at deploy time) depends on the deployment substrate decided in E3. Revisit post-E3. | TBD |
 
 **Total: ~14-16 weeks ≈ 4 months at observed pace.**
@@ -175,11 +175,22 @@ SBOM in CycloneDX format per binary, generated in CI (cargo-cyclonedx). `cargo-a
 
 Likely sub-questions: SBOM publication — embed in container labels, attach to GitHub releases, or both? `cargo-deny` policy — strict or permissive on yanked crates? Threat-model audience — security buyers (more abstract) or pen-testers (more concrete)?
 
-### E6 — Regulatory Export
+### E6 — Regulatory Export *(in flight)*
 
 `POST /export/regulatory` on warden-ledger producing an EU AI Act Article 11/12-compliant bundle: technical documentation snapshot (system architecture, data flow, training data sources for any AI components), automatic logging records (the chain itself), risk management documentation. Bundle is signed, time-window-scoped, and produced as a tar of canonical-form JSON + the existing Iceberg/Parquet exports.
 
-Likely sub-questions: which articles in scope — 11 only, 12 only, both, plus 14-15 (human oversight + accuracy)? Bundle format — tar+sig vs zip vs Iceberg-native? GDPR Article 30 (records of processing) too, or strictly AI Act? Data retention policy — bundle includes a TTL? Article 12 logging includes "automatic recording of events ('logs')" which the chain already satisfies — is the export just a re-encoding, or do we need additional metadata?
+**Sub-questions resolved at slice-1 grilling 2026-05-07:**
+
+- **Articles in scope:** 11 + 12 only. 14-15 (human oversight, accuracy) need operator-supplied prose; deferred. GDPR Article 30 has a different surface (data categories, recipients) and isn't auto-derivable from forensic events; deferred until a buyer asks.
+- **Bundle format:** `.tar.gz` containing NDJSON + `manifest.json` + plain-text `README.txt`. NDJSON over Parquet because the audience reaches for Python / Excel / `jq` more readily than Parquet tooling; the cold-tier `/export` still produces Parquet for analytics. Detached `.sig` rather than embedded — keeps the `manifest.json` byte-stable across signing implementations.
+- **Re-encoding vs. metadata layer:** Re-encoding. The chain rows land verbatim in NDJSON; the manifest adds chain-state pointers (`prev_hash_at_window_start`, `entry_hash_at_window_end`) so the bundle is independently verifiable without a warden binary.
+- **Retention/TTL:** Bundle is operator-fetched + operator-stored. We don't retain bundles server-side; auditors set their own retention. Manifest carries `generated_at` so the operator's downstream archive knows when each bundle was produced.
+
+**Slices:**
+
+- **Slice 1 — bundle shape (shipped 2026-05-07).** `POST /export/regulatory?from=…&to=…` returning `.tar.gz`. Half-open window `[from, to)`. Manifest schema v1 with `row_count`, `seq_lo`, `seq_hi`, `chain_state.{prev_hash_at_window_start,entry_hash_at_window_end}`, `ndjson_sha256`, `article_scope: ["EU-AI-Act-Article-11", "EU-AI-Act-Article-12"]`, `signature: null`. Empty windows return a valid bundle with `row_count: 0` (auditors expect a verifiable artifact even for "we logged nothing"). 11 unit + 5 integration tests. `tar = "0.4"` and `flate2 = "1"` deps added to `warden-ledger`.
+- **Slice 2 — detached signature (open).** Route the `manifest.json` bytes through warden-identity `/sign` (existing surface, used by chain v2 today) and emit a sidecar `manifest.sig` inside the tar. Manifest's `signature` field flips to a struct with `key_id` + `algorithm` so verifiers know which JWKS key to fetch.
+- **Slice 3 — operator-supplied prose + Parquet pointers + CLI (open).** `--readme path/to/technical-doc.md` (Article 11 prose). Optional `--include-exports` flag to embed pointers (S3 URIs) to the existing `/export` Parquet artifacts whose `seq_lo..seq_hi` overlaps the window. `wardenctl regulatory export --from … --to … --output ./bundle.tar.gz` so operators don't curl raw HTTP.
 
 ## Out of scope (and why)
 
