@@ -2,11 +2,11 @@
 
 Authoritative milestone plan for Tier 3 hardening. Companion to `IDENTITY.md` and `ONBOARDING.md`. This file is the "what's next" reference — re-verify against `git log --oneline -10` per repo before relying on any "shipped" claim.
 
-## Status (as of 2026-05-06)
+## Status (as of 2026-05-07)
 
-Phases 1-4 of the original plan: **done**. Tier 2 GTM (`warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`): **done**. Identity P0-P5, including P4 attestation enforcement (rego `attestation_required` + per-tool measurement allowlist + per-spiffe-id verifier cache + chaos-monkey `unattested_binary`): **done**. WAO (Warden Agent Onboarding) P1-P5 with default flipped to `Enforce` and `wardenctl agents migrate` shipped: **done**. WebAuthn approver auth (warden-hil + warden-console, HIL holds passkey credentials, console shuttles the HIL session cookie): **done** (2026-05-03). Console `/config` diagnostic page (`CONFIG.md`): **done**.
+Phases 1-4 of the original plan: **done**. Tier 2 GTM (`warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`): **done**. Identity P0-P5, including P4 attestation enforcement (rego `attestation_required` + per-tool measurement allowlist + per-spiffe-id verifier cache + chaos-monkey `unattested_binary`): **done**. WAO (Warden Agent Onboarding) P1-P5 with default flipped to `Enforce` and `wardenctl agents migrate` shipped: **done**. WebAuthn approver auth (warden-hil + warden-console, HIL holds passkey credentials, console shuttles the HIL session cookie): **done** (2026-05-03). Console `/config` diagnostic page (`CONFIG.md`): **done**. E1 viewer-route gating: **done** (2026-05-07).
 
-Active horizon: **Tier 3 — first-customer hardening**. E1 (Human Auth Surface — WebAuthn slice), E2 (Identity P4 Attestation), E3 (Operability), E4 (Observability), and E5 (Supply Chain & Threat Model) are closed; **E1 viewer-route gating + E6 are the open backlog.**
+Active horizon: **Tier 3 — first-customer hardening**. E1 (Human Auth Surface — WebAuthn + OIDC + basic-admin + RBAC + viewer-route gating), E2 (Identity P4 Attestation), E3 (Operability), E4 (Observability), and E5 (Supply Chain & Threat Model) are closed; **E6 Regulatory Export is the only remaining epic.**
 
 No design partner yet. Milestones target the *median enterprise security review* — what every buyer asks regardless of vertical — rather than any specific vertical's procurement checklist. When a real design-partner appears, this roadmap will get re-shaped by their checklist; until then, optimize for optionality.
 
@@ -14,7 +14,7 @@ No design partner yet. Milestones target the *median enterprise security review*
 
 | # | Epic | Headline gap closed | Size (solo) |
 |---|------|---------------------|-------------|
-| **E1** | **Human Auth Surface** *(WebAuthn slice **shipped 2026-05-03**; OIDC + basic-admin remain open)* | OIDC SSO + basic-admin mode alongside the existing WebAuthn approver flow; Slack/Teams self-link; `WARDEN_CONSOLE_AUTH` selector with loopback guard. Closes the "WebAuthn is the only auth path; no enterprise SSO story" gap. | ~2 weeks |
+| **E1** | **Human Auth Surface** *(**shipped**: WebAuthn 2026-05-03, OIDC + basic-admin + RBAC + Slack/Teams self-link 2026-05-04…06, viewer-route gating 2026-05-07)* | OIDC SSO + basic-admin mode alongside the existing WebAuthn approver flow; Slack/Teams self-link; `WARDEN_CONSOLE_AUTH` selector with loopback guard; viewer-or-better gate on every read route (`/audit`, `/agents`, `/config`, `/exports`, …) with 303 → /login on no-session and 401 on SSE/JSON. Closes the "WebAuthn is the only auth path; no enterprise SSO story" gap. | ~2 weeks |
 | **E2** | **Identity P4 — Attestation Enforcement** *(**shipped**)* | `attestation_required` rego rule + per-tool measurement allowlist + chain v2 ledger dispatch + per-spiffe-id verifier cache + chaos-monkey `unattested_binary` scenario, all wired through proxy → policy → ledger. | ~2 weeks |
 | **E3** | **Operability Foundation** | `/health` + `/readyz` everywhere, graceful shutdown, Dockerfile audit, per-repo GitHub Actions CI, helm chart skeleton. | ~3 weeks |
 | **E4** | **Observability** *(**shipped**)* | Prometheus `/metrics` per service, OTEL trace export across all six services, structured JSON logging with `correlation_id` span propagation through every request handler, on-call runbook set (`RUNBOOKS.md`). | ~2-3 weeks |
