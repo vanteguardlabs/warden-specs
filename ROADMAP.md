@@ -4,7 +4,7 @@ Authoritative milestone plan for Tier 3 hardening. Companion to `IDENTITY.md` an
 
 ## Status (as of 2026-05-06)
 
-Phases 1-4 of the original plan: **done**. Tier 2 GTM (`warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`): **done**. Identity P0-P3 + P5 federation: **done**. WAO (Warden Agent Onboarding) P1-P5 with default flipped to `Enforce` and `wardenctl agents migrate` shipped: **done**.
+Phases 1-4 of the original plan: **done**. Tier 2 GTM (`warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-console`): **done**. Identity P0-P3 + P5 federation: **done**. WAO (Warden Agent Onboarding) P1-P5 with default flipped to `Enforce` and `wardenctl agents migrate` shipped: **done**. WebAuthn approver auth (warden-hil + warden-console, HIL holds passkey credentials, console shuttles the HIL session cookie): **done** (2026-05-03).
 
 Active horizon: **Tier 3 — first-customer hardening**.
 
@@ -14,7 +14,7 @@ No design partner yet. Milestones target the *median enterprise security review*
 
 | # | Epic | Headline gap closed | Size (solo) |
 |---|------|---------------------|-------------|
-| **E1** | **Human Auth Surface** | Console & HIL approver authentication. Closes the "console binds to localhost / no auth on Yellow-tier approvals" gap. | ~2 weeks |
+| **E1** | **Human Auth Surface** | OIDC SSO + basic-admin mode alongside the existing WebAuthn approver flow; Slack/Teams self-link; `WARDEN_CONSOLE_AUTH` selector with loopback guard. Closes the "WebAuthn is the only auth path; no enterprise SSO story" gap. | ~2 weeks |
 | **E2** | **Identity P4 — Attestation Enforcement** | Closes the explicitly-named open item in `IDENTITY.md`: `attestation_required` rego rule + per-method allowlist + chain v2 ledger dispatch + verifier cache + chaos-monkey `unattested_binary` scenario. | ~2 weeks |
 | **E3** | **Operability Foundation** | `/health` + `/readyz` everywhere, graceful shutdown, Dockerfile audit, per-repo GitHub Actions CI, helm chart skeleton. | ~3 weeks |
 | **E4** | **Observability** | Prometheus `/metrics` per service, OTEL tracing across the security pipeline, structured JSON logging with `correlation_id` propagation, runbook set. | ~2-3 weeks |
@@ -28,7 +28,7 @@ No design partner yet. Milestones target the *median enterprise security review*
 
 `E1 → E2 → E3 → E4 → E5 → E6`
 
-- **E1 first** because no-auth-on-the-console is the single most "this is a dev project" smell. Highest embarrassment-per-week-of-work.
+- **E1 first** because WebAuthn-only auth is a dealbreaker for any buyer with existing SSO. Adding OIDC is the highest "are we enterprise-ready" yes/no.
 - **E2 second** because it's *named open* in `CLAUDE.md` and `IDENTITY.md`. Closing it lets us write "Identity spec fully shipped" in one place and stop carrying mental load.
 - **E3 third, not first**, because some of E1's work (which OIDC provider, which secrets, basic-admin posture) informs the deployment story; doing them in opposite order creates rework.
 - **E4 after E3** because observability hooks land naturally into the CI + runbook structure built in E3.
@@ -41,18 +41,24 @@ No design partner yet. Milestones target the *median enterprise security review*
 
 Two components, both in the existing repos. **Out of scope:** service-to-service auth (split out as E1.5).
 
-1. **Console OIDC SSO** in `warden-console`.
-2. **HIL approver auth** via the same OIDC identity — no WebAuthn step-up in v1, but designed with hooks for future addition.
-3. **Slack/Teams self-link** via OAuth, surfaced as a new `/me/identities` page in the console.
-4. **Console → HIL trust** via shared bearer secret as an interim, replaced by E1.5.
+**Existing posture (shipped 2026-05-03):** WebAuthn approver auth, end-to-end. HIL holds passkey credentials; console proxies WebAuthn ceremonies and shuttles HIL's `Set-Cookie` back to the browser. HIL stamps `decided_by` server-side as `webauthn:{name}` and ignores the request body's `decided_by` when auth is enabled. `WARDEN_HIL_AUTH_DISABLED=true` keeps an unauthenticated mode for the e2e runner.
+
+E1 extends that posture rather than replacing it:
+
+1. **Console OIDC SSO** in `warden-console`, alongside the existing WebAuthn flow.
+2. **HIL OIDC verification path** so OIDC-mode `/decide` traffic gets the same `Authn::*` enforcement WebAuthn already gets — `decided_by` stamped server-side from the verified token (not the request body).
+3. **`basic-admin` mode** for solo evaluation.
+4. **Slack/Teams self-link** via OAuth, surfaced as a new `/me/identities` page in the console.
+5. **`WARDEN_CONSOLE_AUTH` selector** with four modes (see below) — runtime configuration, not a build-time choice.
 
 ### Auth modes
 
-Three modes, selected via `WARDEN_CONSOLE_AUTH={disabled|basic-admin|oidc}`:
+Four modes, selected via `WARDEN_CONSOLE_AUTH={disabled|basic-admin|webauthn|oidc}`:
 
-- `disabled` — today's behavior. Loopback only (`--bind 127.0.0.1`). For dev/CI.
+- `disabled` — exposes today's `WARDEN_HIL_AUTH_DISABLED=true` posture under a console-side switch. Loopback only (`--bind 127.0.0.1`). For dev/CI.
 - `basic-admin` — single hardcoded admin user from env (`WARDEN_CONSOLE_ADMIN_USER` + `WARDEN_CONSOLE_ADMIN_PASS_BCRYPT`). For solo evaluation. **Refuses to boot on a non-loopback bind unless `WARDEN_CONSOLE_ALLOW_BASIC_ADMIN_NETWORK=true` is set explicitly.**
-- `oidc` — generic OIDC code flow against any compliant IdP. For production.
+- `webauthn` — current shipped posture. Default for self-hosted small-team deployments.
+- `oidc` — generic OIDC code flow against any compliant IdP. For production with an existing SSO.
 
 ### RBAC
 
@@ -88,27 +94,34 @@ CREATE TABLE user_identities (
 
 A Slack/Teams approve click looks up `user_id → oidc_sub` via this table. **If no mapping exists, the click is rejected** with "your Slack identity is not linked — link via the console first." This forces the chain row to consistently stamp the same identity (`oidc:<sub>`) regardless of which channel the approval came from.
 
+**Schema caveat:** the table sketch above keys on `oidc_sub`, but `webauthn` and `basic-admin` modes don't produce OIDC subs. Implementation-time decision: either add per-mode columns (`oidc_sub` / `webauthn_name` / `basic_username`, all nullable, with a CHECK constraint that exactly one is set) or introduce an internal `user_id` PK with a separate `auth_identities` join. Both are reversible; the PK choice doesn't bind the wire format.
+
 Buyer creates their own Slack/Teams app from a manifest published in `warden-console/docs/` — no marketplace presence.
 
 ### Chain `decided_by` schema
 
-Today's chain row stamps the literal string `"warden-console"` as `decided_by`. **This is fixed in E1**. Post-E1 values:
+The literal `"warden-console"` value was replaced 2026-05-03 — HIL now stamps `decided_by` server-side from the verified WebAuthn principal. E1 extends the convention to the new modes:
 
-- `oidc:<sub>` — console OIDC mode, or Slack/Teams click after self-link.
-- `basic:<username>` — console basic-admin mode (auditor reads this and immediately knows the deployment was running in basic-admin mode).
+- `webauthn:{name}` — already shipped.
+- `oidc:<sub>` — added with OIDC mode; also stamped on Slack/Teams clicks after self-link (the OAuth-linked `oidc_sub` flows through, not the underlying channel id).
+- `basic:<username>` — added with basic-admin mode (auditor reads this and immediately knows the deployment was running in basic-admin mode).
 
-The chain row also gains an `approver_assertion` JSON blob (extension hook for future WebAuthn step-up):
+The chain row also gains an `approver_assertion` JSON blob — extension hook for stronger per-decision claims, populated forward from E1 onwards:
 
-- Today: `{ "method": "oidc-session", "sub": "...", "iat": ... }`
-- Future-compat: `{ "method": "webauthn", "credential_id": ..., "assertion": ... }`
+- WebAuthn: `{ "method": "webauthn", "credential_id": "...", "iat": ... }`
+- OIDC: `{ "method": "oidc-session", "sub": "...", "iat": ... }`
+- Basic: `{ "method": "basic-admin", "username": "..." }` (intentionally cheap — no chain-of-trust to assert)
 
-No chain-version bump required; the field is additive.
+Existing WebAuthn rows in the chain don't get the field retroactively; only rows produced after E1 lands carry it. No chain-version bump required; the field is additive.
 
 ### Console → HIL trust
 
-Console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console presents on every `/decide` call; HIL validates the bearer and trusts `decided_by` from the request body because the bearer proves the caller *is* the console. **Both processes refuse to boot if `--auth` is not `disabled` and the token is missing.**
+The trust path is **mode-dependent** because WebAuthn already has a stronger one and we don't tear it out:
 
-This is an interim posture that gets replaced by SVID-based mTLS in E1.5. When E1.5 lands, the env var and header check are removed.
+- **WebAuthn mode (today, unchanged):** HIL is the credential authority. The console proxies WebAuthn ceremonies and shuttles HIL's session cookie back to the browser; subsequent `/decide` calls attach the HIL cookie and HIL stamps `decided_by` from the verified principal.
+- **OIDC / basic-admin / disabled (new in E1):** HIL has no credential to verify, so console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console verifies OIDC (or basic-admin), stamps `decided_by`, and presents the bearer on `/decide`. HIL trusts the request-body `decided_by` *only when* a valid bearer is present; without the bearer, the existing `Authn::Disabled` fallback applies. **Both processes refuse to boot if the configured mode requires the token and it is missing.**
+
+The bearer is the interim posture for the non-WebAuthn modes; E1.5 replaces it with SVID-based mTLS uniformly across all modes (WebAuthn included).
 
 ### Mechanical defaults
 
@@ -120,7 +133,7 @@ This is an interim posture that gets replaced by SVID-based mTLS in E1.5. When E
 
 ### When v2 work would be triggered
 
-- **WebAuthn step-up for HIL approvals**: trigger = first design-partner from FinTech (PSD2 SCA), defense (FIPS / DoD impact level), or healthcare (HIPAA technical safeguards). Until then, OIDC + IdP-enforced MFA is sufficient.
+- **Per-decision WebAuthn step-up over OIDC sessions**: trigger = first design-partner from FinTech (PSD2 SCA), defense (FIPS / DoD impact level), or healthcare (HIPAA technical safeguards). The WebAuthn primitives already exist (today's default mode); v2 wires them as a step-up gating individual `/decide` calls on top of OIDC sessions, rather than as a parallel auth mode.
 - **Runtime role-management UI**: trigger = first buyer who demands non-GitOps role exceptions. Until then, config-as-code is sufficient.
 - **Admin role + agent-registry UI in console**: trigger = first user who explicitly wants agent CRUD outside `wardenctl`. Until then, `wardenctl` + direct identity API are sufficient.
 - **Four-eyes / separation-of-duties**: trigger = first buyer demanding per-human approval limits or "two distinct approvers required." This also triggers the upgrade from self-link to a more rigorous identity unification scheme.
@@ -181,6 +194,17 @@ Likely sub-questions: which articles in scope — 11 only, 12 only, both, plus 1
 | Q8 | Cross-channel identity: self-link via OAuth (adds `user_identities` table) |
 | Q9 | Auth modes: 3 modes (`disabled` / `basic-admin` / `oidc`); basic-admin refuses non-loopback bind by default |
 | Q10 | Console → HIL trust: shared bearer secret as interim; replaced by E1.5 |
+
+### Correction (2026-05-06, post-implementation audit)
+
+The grilling above predates an audit of the shipped console + HIL code, which uncovered work the original Q&A treated as missing:
+
+- WebAuthn approver auth shipped 2026-05-03 (`warden-hil@12ba0df`, `warden-console@8cd2630`). HIL holds passkey credentials; console proxies the ceremony and shuttles the HIL session cookie. The "console binds to localhost / no auth on Yellow-tier approvals" framing was stale on the day it was written.
+- HIL already stamps `decided_by` server-side as `webauthn:{name}` and ignores the request body when auth is enabled. Q6's "decided_by literal `warden-console`" claim is stale.
+- Q9 specified three modes; with WebAuthn as the existing default, four are needed.
+- The Console → HIL trust path is mode-dependent rather than uniformly bearer-based — Q10's bearer choice still applies, but only to OIDC / basic-admin / disabled modes.
+
+The E1 spec section above incorporates the correction and supersedes the rows in the decision-log table where they conflict.
 
 ## Pacing note
 
