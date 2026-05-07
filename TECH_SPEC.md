@@ -503,7 +503,7 @@ The outer hashable is fixed at v3 launch and never altered without a v4 bump. Pe
 ```json
 {
   "id":               "<uuidv7>",
-  "timestamp":        "2026-05-05T14:30:00Z",
+  "timestamp":        "<RFC 3339 UTC>",
   "event_kind":       "agent.registered",
   "agent_id":         "<uuidv7 of the agents row>",
   "tenant":           "acme",
@@ -1021,11 +1021,11 @@ The v1 page does not include a "(future) Operator preferences" placeholder card.
 
 Console + HIL human-auth surface — what an operator presents to the console, how the console proves an approver to HIL, and how Slack / Teams approvers anchor cross-channel clicks to a stable operator identity. Companion to "Console config page" (the read-only `/config` diagnostic) and the HIL section of `README.md`.
 
-**Module status:** **shipped 2026-05-03 → 2026-05-07.** WebAuthn approver auth shipped 2026-05-03; OIDC + basic-admin + RBAC + Slack / Teams self-link 2026-05-04…06; viewer-route gating 2026-05-07. Touches `warden-hil` (passkey credentials, session cookie, `Authn::*` server-side stamping) and `warden-console` (auth-mode selector, ceremony proxy, `/me/identities`, viewer / approver gates).
+**Module status:** **shipped.** WebAuthn approver auth, OIDC, basic-admin, RBAC, Slack / Teams self-link, and viewer-route gating are all in. Touches `warden-hil` (passkey credentials, session cookie, `Authn::*` server-side stamping) and `warden-console` (auth-mode selector, ceremony proxy, `/me/identities`, viewer / approver gates).
 
 ### 1. What this closes
 
-Pre-2026-05-03, WebAuthn was the only auth path. That was a dealbreaker for buyers with existing OIDC SSO and there was no solo-evaluation mode. Cross-channel approvers (Slack / Teams) had no way to anchor their clicks to a stable operator identity, so chain rows could carry inconsistent `decided_by` values across channels. Read routes had no viewer-or-better gate, so a misconfigured deploy could leak audit data to anyone who hit the URL.
+Originally, WebAuthn was the only auth path. That was a dealbreaker for buyers with existing OIDC SSO and there was no solo-evaluation mode. Cross-channel approvers (Slack / Teams) had no way to anchor their clicks to a stable operator identity, so chain rows could carry inconsistent `decided_by` values across channels. Read routes had no viewer-or-better gate, so a misconfigured deploy could leak audit data to anyone who hit the URL.
 
 ### 2. Auth modes
 
@@ -1082,9 +1082,9 @@ Buyers create their own Slack / Teams app from a manifest published in `warden-c
 
 ### 5. Chain `decided_by` schema
 
-The literal `"warden-console"` value was replaced 2026-05-03 — HIL now stamps `decided_by` server-side from the verified principal:
+The literal `"warden-console"` value has been replaced — HIL now stamps `decided_by` server-side from the verified principal:
 
-- `webauthn:{name}` — WebAuthn mode (shipped 2026-05-03).
+- `webauthn:{name}` — WebAuthn mode.
 - `oidc:<sub>` — OIDC mode; also stamped on Slack / Teams clicks after self-link (the OAuth-linked `oidc_sub` flows through, not the underlying channel id).
 - `basic:<username>` — basic-admin mode (auditor reads this and immediately knows the deployment was running in basic-admin mode).
 
@@ -1129,7 +1129,7 @@ Triggers, not commitments — listed so a future contributor knows the hooks are
 
 EU AI Act Article 11 / 12 audit-bundle export from the existing hash chain. Operator-fetched, operator-stored, signed, time-window scoped. Companion to the cold-tier `/export` (Iceberg + Parquet analytics snapshots) but with a different audience: external regulators, not internal analysts.
 
-**Module status:** **shipped 2026-05-07 (slices 1 + 2 + 3).** Lives in `warden-ledger` + `warden-identity` (new `POST /sign/blob`) + `warden-sdk` + `wardenctl`. No chain-version change.
+**Module status:** **shipped (slices 1 + 2 + 3).** Lives in `warden-ledger` + `warden-identity` (new `POST /sign/blob`) + `warden-sdk` + `wardenctl`. No chain-version change.
 
 ### 1. What this closes
 
@@ -1169,7 +1169,7 @@ NDJSON over Parquet because the audience reaches for Python / Excel / `jq` more 
 ```jsonc
 {
   "schema_version": "3",
-  "generated_at": "2026-05-07T12:34:56Z",
+  "generated_at": "<RFC 3339 UTC>",
   "window": { "from": "...", "to": "..." },
   "row_count": 1234,
   "seq_lo": 5000,
@@ -1260,7 +1260,7 @@ Companion to none of the existing sections in form. Where [Console config page](
 
 **Module status:** new, marketing/funnel work. Extends `warden-website` (guided tour), `warden-console` (demo-mode), `warden-ledger` + `warden-hil` (token-scoped read filters and HIL approve enforcement), `warden-chaos-monkey` (extracted into a `warden-chaos-catalog` library + thin CLI wrapper). Adds one new artifact: a Cloudflare Worker for token mint. No new container in `docker-compose.yml`. No new chain version.
 
-Design decided by the `/grill-me` walkthrough on 2026-05-06. Thirteen architectural decisions resolved in sequence; four confirmations on operational tradeoffs. This doc is the consolidated record so the implementation work can begin from a stable baseline.
+Design decided by a `/grill-me` walkthrough. Thirteen architectural decisions resolved in sequence; four confirmations on operational tradeoffs. This doc is the consolidated record so the implementation work can begin from a stable baseline.
 
 ### 1. What this closes
 
@@ -1349,7 +1349,7 @@ Cloudflare (CDN + WAF + Workers + Turnstile)
                 ├── nats, vault, bootstrap
                 ├── ledger, policy-engine, brain, hil, identity, proxy, console
                 ├── upstream-stub, simulator (always running, ambient traffic)
-                └── website (added 2026-05-06)
+                └── website
 ```
 
 VPS firewall: accept only Cloudflare IP ranges. The mint endpoint is at the edge — there is no anonymous-traffic-touching surface on the VPS.
@@ -1470,7 +1470,7 @@ These emerge during the build, not at design time:
 
 ### 10. Confirmed before writing code
 
-The four operational tradeoffs that gate the green light, all confirmed 2026-05-06:
+The four operational tradeoffs that gate the green light, all confirmed:
 
 1. The week-2 kill-switch is real — receipts-only ships if metrics say so.
 2. Single VPS, no HA, "best effort business hours" demo SLA is acceptable.

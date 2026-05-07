@@ -1,6 +1,6 @@
 # Agent Warden — Implemented Features
 
-A complete inventory of what's shipped today (2026-05-07), with each feature explained on three axes:
+A complete inventory of what's shipped today, with each feature explained on three axes:
 
 1. **Concept** — what it does and why it matters.
 2. **Implementation** — where the code lives and the load-bearing structs / wire shapes.
@@ -66,7 +66,7 @@ Console `/audit` shows the resolved `agent_id` on every row — that's the CN/SP
 
 ### 1.2 Security-first serial pipeline
 
-**Concept.** When a request arrives, the proxy resolves the security verdict (Brain → Policy, then HIL if Yellow-tier) **before** any upstream call. Earlier commits raced security against upstream via `tokio::select!` to optimize latency, but that race re-opened a side-effect window for Yellow-tier tools — a wire transfer would have fired before HIL approval. The race was dropped on 2026-05-02. Today the proxy fails closed: upstream is only contacted on `Authorized` or HIL-Approved verdicts.
+**Concept.** When a request arrives, the proxy resolves the security verdict (Brain → Policy, then HIL if Yellow-tier) **before** any upstream call. Earlier commits raced security against upstream via `tokio::select!` to optimize latency, but that race re-opened a side-effect window for Yellow-tier tools — a wire transfer would have fired before HIL approval. The race has been dropped. Today the proxy fails closed: upstream is only contacted on `Authorized` or HIL-Approved verdicts.
 
 **Implementation.** `handle_mcp` in `warden-proxy/src/lib.rs` awaits the `fork` module's verdict before forking upstream. `update_history` (which records the agent's recent-call counter for velocity tracking) only runs on successful upstream calls — i.e. inside `forward_upstream`, after the verdict resolves.
 
@@ -109,7 +109,7 @@ Console `/audit` shows `intent_category` and `reasoning` columns.
 ```bash
 curl -X POST http://localhost:8082/evaluate \
   -H 'content-type: application/json' \
-  -d '{"tool_type":"wire_transfer","agent_id":"test","method":"tools/call","intent_score":0.1,"current_time":"2026-05-07T12:00:00Z","recent_request_count":0}'
+  -d '{"tool_type":"wire_transfer","agent_id":"test","method":"tools/call","intent_score":0.1,"current_time":"<RFC 3339 UTC>","recent_request_count":0}'
 ```
 
 Returns `{ "allow": false, "reason": "..." }` — wire_transfer requires HIL or attestation.
@@ -287,7 +287,7 @@ Then export the chain and verify a row's signature with `openssl` + `sha256sum` 
 **Verify.**
 
 ```bash
-wardenctl regulatory export --from 2026-05-01T00:00:00Z --to 2026-05-08T00:00:00Z --output bundle.tar.gz
+wardenctl regulatory export --from <FROM_RFC3339> --to <TO_RFC3339> --output bundle.tar.gz
 tar -xzf bundle.tar.gz
 cat manifest.sig    # 128 hex chars + LF
 ```
@@ -406,7 +406,7 @@ curl "http://localhost:8083/audit/correlation/<id>" | jq
 
 **Concept.** A migration switch. `off` ignores the registry entirely. `warn` keeps `/svid` and `/grant` succeeding for unregistered agents but stamps an `unregistered_agent` signal on the forensic event so operators see what would have been blocked. `enforce` rejects unregistered agents with 403. The principle: registration is opt-in to enforcement — once a record exists, its envelope is enforced regardless of mode, otherwise registration in `warn` would be decorative.
 
-**Implementation.** `WARDEN_IDENTITY_REGISTRATION_MODE` env var, parsed into `Mode::{Off, Warn, Enforce}`. **Today the default is `Enforce`** (the rollout flip happened on 2026-05-04). Operators bulk-enroll legacy fleets via `wardenctl agents migrate` before the flip.
+**Implementation.** `WARDEN_IDENTITY_REGISTRATION_MODE` env var, parsed into `Mode::{Off, Warn, Enforce}`. **Today the default is `Enforce`** (the rollout flip has already happened). Operators bulk-enroll legacy fleets via `wardenctl agents migrate` before the flip.
 
 **Verify.**
 
@@ -628,7 +628,7 @@ open http://localhost:8085/login
 
 ### 5.6 Server-stamped `decided_by`
 
-**Concept.** Pre-2026-05-03 the chain stamped `decided_by = "warden-console"` regardless of which human clicked. After the fix, HIL stamps `decided_by` server-side from the verified principal — the request body can't override it. Three formats: `webauthn:{name}`, `oidc:<sub>`, `basic:<username>`.
+**Concept.** Originally the chain stamped `decided_by = "warden-console"` regardless of which human clicked. After the fix, HIL stamps `decided_by` server-side from the verified principal — the request body can't override it. Three formats: `webauthn:{name}`, `oidc:<sub>`, `basic:<username>`.
 
 **Implementation.** `warden-hil/src/decide.rs` resolves the verified principal from session/cookie/bearer and writes it to the chain row. Slack and Teams clicks stamp `oidc:<sub>` via the linked `oidc_sub` lookup — the underlying channel ID never appears on the chain.
 
@@ -735,7 +735,7 @@ wardenctl agents migrate --identity-db ... --default-envelope '*'
 
 ```bash
 wardenctl regulatory export \
-  --from 2026-05-01T00:00:00Z --to 2026-05-08T00:00:00Z \
+  --from <FROM_RFC3339> --to <TO_RFC3339> \
   --readme ./tech-docs.md \
   --include-exports \
   --output bundle.tar.gz
@@ -1074,7 +1074,7 @@ docker compose -f repos/warden-e2e/docker-compose.yml --profile stack down -v
 
 **Concept.** Curated red-team catalog. Each scenario fires a specific attack at a live proxy and asserts the predicted verdict. The list grows as the threat model expands; removing a scenario requires explaining why the attack is no longer relevant.
 
-**Implementation.** Rust CLI at `repos/warden-chaos-monkey/`. Scenarios as of 2026-05-07:
+**Implementation.** Rust CLI at `repos/warden-chaos-monkey/`. Current scenarios:
 
 - Layer 2/3: `denylist`, `injection`, `velocity_breaker` (must run last), `business_hours`, `control`
 - HIL: `hil_yellow_denied`, `hil_yellow_expired`
