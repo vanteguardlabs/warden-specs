@@ -746,28 +746,28 @@ Warden ships a **shadow attacker** module. Once a week it spawns a malicious age
 
 Goal: a $500M+ acquisition by a tier-one cloud or security incumbent (Google, Palo Alto Networks, CrowdStrike) within 24 months.
 
-### Phase 1 — Months 1–6: the standard-bearer era
+### Months 1–6: the standard-bearer era
 Establish MCP as the security battleground.
 
 - **Open-source Warden Lite.** Lightweight Rust MCP proxy; free for local agents. Capture bottom-up mindshare.
 - **Shadow-agent audit tool.** Free scanner that detects unsecured agentic activity in corporate Slack, GitHub, Jira. The CISO lead magnet.
 - **Strategic hires.** Lead engineers from the 2025/2026 NIST AI Agent Standards and OWASP Top 10 for Agentic Applications.
 
-### Phase 2 — Months 7–12: the compliance lock-in
+### Months 7–12: the compliance lock-in
 Become the mandatory bridge for EU AI Act and NIST.
 
 - **Article 14/15 automation** — turn legal fear into one-click compliance.
 - **Design-partner cohort** — first 10 Fortune 500 customers (FinTech, health, gov).
 - **Identity federation** — partner with Okta / CyberArk so Warden becomes the enforcement engine for their identity layer.
 
-### Phase 3 — Months 13–18: the FinOps & routing explosion
+### Months 13–18: the FinOps & routing explosion
 Prove that security saves money.
 
 - **Semantic routing engine** — auto-route simple tasks to local Llama 3/4, complex to frontier.
 - **ROI dashboard** — "you saved $1M in API costs by using Warden." Flips the budget from security (grudge) to operations (growth).
 - **Stateful agent observability** — black-box recorder that lets legal "rewind" an agent's reasoning to find injection points.
 
-### Phase 4 — Months 19–24: the exit auction
+### Months 19–24: the exit auction
 Engineer a bidding war between cloud giants and cyber titans.
 
 - **Enterprise ubiquity** — 50+ logos at 140% NRR.
@@ -958,7 +958,7 @@ Warden evolves from security gateway into the **universal AI operating system**:
 
 ## 22. Implementation status
 
-This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-06, all four phases of the build plan, Tier-2 GTM, identity P0–P5 (incl. P4 attestation enforcement), and WAO (Warden Agent Onboarding) P1–P5 are shipped. Re-verify with `git log` per repo before relying on any specific claim.
+This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. As of 2026-05-06, the full build plan, the GTM surface, the identity service, and Warden Agent Onboarding are shipped. Re-verify with `git log` per repo before relying on any specific claim.
 
 | Layer | Repo                    | Port  | Role                                                                  |
 |-------|--------------------------|-------|------------------------------------------------------------------------|
@@ -978,6 +978,6 @@ Notable deviations from the original spec:
 - **Brain and policy run serially today** despite the fork module name. Parallelising is gated on Brain becoming side-effect-free (Voyage embeddings + indirect-injection Haiku call live there).
 - **Velocity tracker has two backends** — in-process `HashMap` (default) and NATS-KV (JetStream KV bucket, JSON-encoded ms timestamps, CAS update loop). Selected via `WARDEN_VELOCITY_BACKEND={in-process|nats-kv}`.
 
-**Tier-3 hardening — shipped 2026-05-02 → 2026-05-06:** HIL modify-and-resume; explicit chain-version negotiation (`CURRENT_CHAIN_VERSION = 3` with v1/v2/v3 dispatch); opt-in post-export SQLite vacuum with append-only `chain_vacuum_cursor`; native `aws-sdk-s3` sink + real Apache Iceberg v2 metadata on every ledger export; pure-Rust sandbox simulator wired through proxy → HIL → console; WebAuthn approver auth (HIL backend + console proxy + e2e bootstrap); `warden-ledger` `/stream/audit` SSE endpoint and nullable `signal` annotation column; identity P0–P5 — incl. P4 attestation enforcement (rego `attestation_required` + per-tool `attestation_allowlist.json` + `AttestationClaims` on `PolicyInput` + per-spiffe-id verifier cache + `X-Warden-Attestation` per-request override + chaos-monkey `unattested_binary`); WAO P1–P5 (agent registry + lifecycle in `warden-identity`, chain v3 anchoring with outbox durability, `/svid` + `/grant` gating, `enforce` mode is now the default, `wardenctl agents migrate` for legacy fleets, `run-onboarding.sh` e2e); console `/agents`, `/agents/new`, `/agents/{id}` lifecycle UI; `/config` diagnostic page (`CONFIG.md`); E4 Observability — Prometheus `/metrics` per service, OTEL trace export across all six services with distinguishing `service.name` resource attributes, `WARDEN_LOG_FORMAT={pretty|json}` structured logging, `correlation_id` span propagation through every request handler, and the on-call runbook set (`RUNBOOKS.md`); E5 Supply Chain & Threat Model — uniform `deny.toml` and `cargo-deny check all` (advisories + licenses + bans + sources) gating every PR across the 14 Rust repos, `cargo-cyclonedx` SBOM generation + 90-day artifact retention on the same `supply-chain` job, `SECURITY.md` disclosure policy at every repo root (17 repos), RFC 9116 `security.txt` at `warden-website/.well-known/`, and the public `THREATS.md` STRIDE-organized layer-by-layer threat model with explicit non-goals.
+**Hardening pass — shipped 2026-05-02 → 2026-05-06:** HIL modify-and-resume; explicit chain-version negotiation (`CURRENT_CHAIN_VERSION = 3` with v1/v2/v3 dispatch); opt-in post-export SQLite vacuum with append-only `chain_vacuum_cursor`; native `aws-sdk-s3` sink + real Apache Iceberg v2 metadata on every ledger export; pure-Rust sandbox simulator wired through proxy → HIL → console; WebAuthn approver auth (HIL backend + console proxy + e2e bootstrap); `warden-ledger` `/stream/audit` SSE endpoint and nullable `signal` annotation column; the identity service end-to-end — including attestation enforcement (rego `attestation_required` + per-tool `attestation_allowlist.json` + `AttestationClaims` on `PolicyInput` + per-spiffe-id verifier cache + `X-Warden-Attestation` per-request override + chaos-monkey `unattested_binary`); Warden Agent Onboarding (agent registry + lifecycle in `warden-identity`, chain v3 anchoring with outbox durability, `/svid` + `/grant` gating, `enforce` mode is now the default, `wardenctl agents migrate` for legacy fleets, `run-onboarding.sh` e2e); console `/agents`, `/agents/new`, `/agents/{id}` lifecycle UI; `/config` diagnostic page; observability surface — Prometheus `/metrics` per service, OTEL trace export across all six services with distinguishing `service.name` resource attributes, `WARDEN_LOG_FORMAT={pretty|json}` structured logging, `correlation_id` span propagation through every request handler, and the on-call runbook set; supply-chain & threat-model surface — uniform `deny.toml` and `cargo-deny check all` (advisories + licenses + bans + sources) gating every PR across the 14 Rust repos, `cargo-cyclonedx` SBOM generation + 90-day artifact retention on the same `supply-chain` job, `SECURITY.md` disclosure policy at every repo root (17 repos), RFC 9116 `security.txt` at `warden-website/.well-known/`, and the public threat model in `TECH_SPEC.md#threat-model` — STRIDE-organized layer by layer with explicit non-goals.
 
-**Tier-3 hardening — fully shipped 2026-05-07.** All six original Tier-3 epics (Human Auth Surface, Identity P4 Attestation, Operability, Observability, Supply Chain & Threat Model, Regulatory Export) are closed. Substantive design records live as top-level sections in `TECH_SPEC.md` (Operator authentication; Regulatory export). Service-mesh / s2s mTLS work is deferred — see `TECH_SPEC.md#threat-model` "Open items".
+**Hardening pass — fully shipped 2026-05-07.** Human Auth Surface, Identity Attestation, Operability, Observability, Supply Chain & Threat Model, and Regulatory Export are all closed. Substantive design records live as top-level sections in `TECH_SPEC.md` (Operator authentication; Regulatory export). Service-mesh / s2s mTLS work is deferred — see `TECH_SPEC.md#threat-model` "Open items".

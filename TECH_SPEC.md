@@ -22,7 +22,7 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 
 Companion spec to `README.md` §11.3 ("Agent identity — IAM for bots"). Scoped to what §11.3 commits to and grounded in the primitives Warden already ships (NATS forensic bus, hash-chained ledger, HIL, `regorus` policy engine).
 
-**Module status:** **shipped** (P0–P5). Touches `warden-proxy`, `warden-policy-engine`, `warden-ledger`, `warden-hil`; introduced the `warden-identity` service (port 8086). The companion onboarding spec `ONBOARDING.md` (WAO P1–P5, also shipped) layers the agent-registry / lifecycle / capability-envelope work on top of these primitives.
+**Module status:** **shipped.** Touches `warden-proxy`, `warden-policy-engine`, `warden-ledger`, `warden-hil`; introduced the `warden-identity` service (port 8086). The companion [Agent onboarding](#agent-onboarding-wao) section (also shipped) layers the agent-registry / lifecycle / capability-envelope work on top of these primitives.
 
 ### 1. What §11.3 actually commits to
 
@@ -44,7 +44,7 @@ Identity, in Warden's threat model, is **necessary but insufficient** (§13.1). 
 | T2 | Agent A impersonates Agent B in an A→B call | No A2A check today; Brain sees the *receiving* agent's view only | SVID-bound `actor_token` + audience binding rejects mismatch |
 | T3 | Compromised supply chain: agent binary swapped post-deploy | Undetected | Capability attestation gates Yellow-tier tools |
 | T4 | Insider replays a ledger row claiming "the agent did it" | Possible — `agent_id` is not signed by the agent, only stamped by the proxy | Per-action signature chain anchored to ledger `prev_hash` provides non-repudiation |
-| T5 | Human user repudiates an HIL approval ("not me") | WebAuthn approver auth (Tier 3, open) covers approver side | WI binds the *delegation* user→agent so the agent's own action is also non-repudiable |
+| T5 | Human user repudiates an HIL approval ("not me") | WebAuthn approver auth covers approver side | WI binds the *delegation* user→agent so the agent's own action is also non-repudiable |
 
 **Out of scope:** governing the human IdP itself (delegate to Okta/Entra), key custody for the issuing CA (delegate to Vault Transit / KMS), cross-tenant federation v1 (single-tenant first).
 
@@ -251,7 +251,7 @@ The §11.3 valuation claim (⭐⭐⭐⭐⭐, "zero-trust score" metric) and the 
 ### 11. What this spec deliberately does not include
 
 - A bespoke PKI. We use SPIFFE + Vault Transit because they exist and are audited.
-- A new HIL approver flow. WebAuthn approver auth is the existing Tier 3 ticket; this spec only ensures the *agent side* of the delegation is cryptographic. Both sides land independently.
+- A new HIL approver flow. WebAuthn approver auth is a separate workstream; this spec only ensures the *agent side* of the delegation is cryptographic. Both sides land independently.
 - A custom revocation mechanism. Short-TTL SVIDs (≤1h) + grant `jti` denylist published over NATS is enough. CRLs are a 1990s answer to a 2026 problem.
 - A new audit UI. The console's existing `/audit` correlation-id join is the right shape; we just add three columns.
 
@@ -262,7 +262,7 @@ The §11.3 valuation claim (⭐⭐⭐⭐⭐, "zero-trust score" metric) and the 
 
 Companion to `IDENTITY.md`. Where `IDENTITY.md` covers how a *running* agent gets a cryptographic identity (SVID, grant, action signature, attestation), this spec covers the missing pre-step: how an agent gets *registered with the platform* in the first place — who declared it should exist, with what capabilities, owned by which team — and how that record gates every downstream identity operation.
 
-**Module status:** new, Tier 3 hardening backlog. Extends `warden-identity` (no new service); introduces a new top-level CLI binary `wardenctl`; extends `warden-console` and `warden-ledger` (chain v3); touches `warden-e2e` and `warden-chaos-monkey`. Depends on the issuance, signing, and chain-version-negotiation primitives shipped in the `IDENTITY.md` P0–P3 + P5 work.
+**Module status:** shipped. Extends `warden-identity` (no new service); introduces a new top-level CLI binary `wardenctl`; extends `warden-console` and `warden-ledger` (chain v3); touches `warden-e2e` and `warden-chaos-monkey`. Depends on the issuance, signing, and chain-version-negotiation primitives in the [Identity service](#identity-service) section.
 
 ### 1. What this closes
 
@@ -662,7 +662,7 @@ Five phases, mirroring `IDENTITY.md`'s phasing convention. Each independently sh
 4. **Mode `warn`.** `/svid` and `/grant` consult the registry; unregistered names succeed with a signal stamped on the forensic event. Registered agents get envelope enforcement immediately. Console `/audit` highlights `unregistered_agent` rows with the "Register…" link. *Exit:* `warden-e2e` happy path passes with the simulator agents either pre-registered (via migration CLI) or running unregistered with signals; chaos-monkey scenarios assert correct mode behaviour.
 5. **Mode `enforce`.** Default flips. Migration CLI is the official adoption tool — operators run `wardenctl agents migrate --default-envelope '*'` to bulk-enroll existing agents before flipping. `warden-e2e`, `warden-simulator`, `warden-chaos-monkey` boot scripts run the migration in their setup. *Exit:* `warden-e2e` happy path passes with `enforce` and zero unregistered names; chaos-monkey `unregistered_agent_enforce` scenario denies as expected.
 
-Phases 1–3 unblock the §11.3 audit-lineage story (chain row "Alice declared this agent"). Phases 4–5 close the namespace-squat and capability-sprawl threats (T1, T2). Phase 1 is decoupled from the other identity-spec phases — it does not depend on capability-attestation enforcement (`IDENTITY.md` P4) or any other unshipped work.
+The first set of slices unblocks the §11.3 audit-lineage story (chain row "Alice declared this agent"); the later slices close the namespace-squat and capability-sprawl threats (T1, T2). The early slices are decoupled from capability-attestation enforcement and other downstream work.
 
 ### 13. Test surface
 
@@ -726,8 +726,8 @@ The shared types are duplicated on each side of the wire (no shared crate, per r
 - **Bulk operations.** "Suspend all agents owned by team X" is a real incident-response need; v1 admins iterate. Defer until an operator explicitly asks.
 - **Terraform provider.** The `--if-absent` CLI flag covers IaC-shaped use cases. A native Terraform provider is the natural follow-on once a customer asks.
 - **Tenant lifecycle.** Tenants are implicit (declared by first use of the string). A `tenants` table implies billing boundaries, per-tenant IdP federation, and tenant decommissioning — much bigger spec.
-- **WebAuthn approver auth on lifecycle transitions.** Today's auth is OIDC-only on `/agents`. Step-up auth for high-impact transitions (decommission, widen) is the existing Tier 3 WebAuthn ticket; this spec only ensures the transitions are signed in the chain. WebAuthn lands independently.
-- **Per-agent attestation policy beyond `attestation_kinds_accepted`.** Per-method attestation requirements (the `IDENTITY.md` P4 work) remain global. Per-agent rule overrides — "this specific agent's `wire_transfer` calls require measurement X" — wait for P4 to settle before being layered on.
+- **WebAuthn approver auth on lifecycle transitions.** Today's auth is OIDC-only on `/agents`. Step-up auth for high-impact transitions (decommission, widen) is a separate WebAuthn workstream; this spec only ensures the transitions are signed in the chain. WebAuthn lands independently.
+- **Per-agent attestation policy beyond `attestation_kinds_accepted`.** Per-method attestation requirements (capability attestation in [Identity service](#identity-service) §6) remain global. Per-agent rule overrides — "this specific agent's `wire_transfer` calls require measurement X" — wait for the global rule to settle before being layered on.
 - **Agent groups / hierarchies.** No nested ownership, no parent-child agents, no inheritance. Each agent is a flat record. If 50 agents share an envelope, register 50 records (the CLI's `--if-absent` makes this scriptable).
 
 ---
@@ -737,7 +737,7 @@ The shared types are duplicated on each side of the wire (no shared crate, per r
 
 Companion to `ONBOARDING.md` only in form. Where `ONBOARDING.md` is a multi-service initiative with a chain version bump, a new CLI binary, and five rollout phases, this spec is the opposite end of the scale: one read-only HTML page at `/config` in `warden-console` that answers "what is this binary, what is it talking to, and is everything reachable?" — the implicit question every operator currently answers with `ps`, `printenv`, and `curl` against four URLs.
 
-**Module status:** new, Tier 3 hardening backlog. Local to `warden-console`; one additive change to `warden-sdk` (three new public getters). No new service. No chain version change. No new endpoints on any backend. The only cross-repo dependency is bumping the `warden-sdk` version `warden-console` consumes.
+**Module status:** shipped. Local to `warden-console`; one additive change to `warden-sdk` (three new public getters). No new service. No chain version change. No new endpoints on any backend. The only cross-repo dependency is bumping the `warden-sdk` version `warden-console` consumes.
 
 ### 1. What this closes
 
@@ -1508,7 +1508,7 @@ wins.
                             │   Operator             │  human, browser, mTLS
                             │  (console / wardenctl) │
                             └────────────┬───────────┘
-                                         │ HTTPS + bearer (E1 OIDC)
+                                         │ HTTPS + bearer (OIDC)
                                          ▼
 ┌───────────────┐   mTLS    ┌────────────────────────┐
 │   AI agent    │──────────▶│  warden-proxy (L1)     │
@@ -1548,7 +1548,7 @@ External trust dependencies:
   from Vault.
 - **SQLite** (ledger backing store) — assumed local, host-bound; OS
   filesystem ACLs are the only access control.
-- **OIDC IdP** (E1 / WAO) — operator and capability-resolver auth.
+- **OIDC IdP** — operator and capability-resolver auth.
 - **The operator's browser session** — console SSE + htmx + WebAuthn.
 
 ### Layer 1 — warden-proxy
@@ -1561,7 +1561,7 @@ defense-in-depth behind it.
 | Threat | Defense |
 |---|---|
 | An unauthenticated agent calls the proxy. | mTLS-only — `WebPkiClientVerifier` validates the cert chain against the proxy's CA root before any handler runs. |
-| An agent presents a peer's certificate (replay). | The proxy's TLS stack only accepts the cert if the private key is held by the connecting peer (TLS finished MAC). Stolen private keys are still a real threat → defended at Layer 6 (identity P3 signing + per-action JTI). |
+| An agent presents a peer's certificate (replay). | The proxy's TLS stack only accepts the cert if the private key is held by the connecting peer (TLS finished MAC). Stolen private keys are still a real threat → defended by identity action signing + per-action JTI. |
 | An agent forges an SVID by editing the SAN URI. | The SAN is bound to the cert by the issuing CA's signature. A forged SAN means a forged cert means chain verification fails. |
 | A peer Warden cell mints an A2A token for a tenant it doesn't own. | `warden-identity` `/actor-token/redeem` consults the federation bundle and rejects with `peer_bundle_unknown:<td>` if the issuer isn't in the configured peer set. |
 
@@ -1613,7 +1613,7 @@ trust boundary is the proxy-brain link. We don't run mTLS on this link
 today; the assumption is the deployment perimeter (compose network /
 k8s NetworkPolicy) is the perimeter.
 
-→ **Action item, tracked under E1.5 (s2s service mesh):** add SPIFFE
+→ **Action item, tracked under the deferred service-mesh work:** add SPIFFE
 mTLS to the proxy↔brain, proxy↔policy, proxy↔hil, proxy↔identity links
 so an attacker who lands on the cluster's overlay network cannot speak
 directly to the brain and forge `BrainRequest` payloads.
@@ -1715,7 +1715,7 @@ requests.
 
 | Threat | Defense |
 |---|---|
-| An attacker decides on a pending without approver auth. | E1 OIDC + WebAuthn step-up gates `POST /pending/{id}/decide`. The HIL service requires a verified bearer for every state transition. The proxy never decides on its own behalf. |
+| An attacker decides on a pending without approver auth. | OIDC + WebAuthn step-up gates `POST /pending/{id}/decide`. The HIL service requires a verified bearer for every state transition. The proxy never decides on its own behalf. |
 
 #### Tampering
 
@@ -1745,7 +1745,7 @@ federation, agent registry / lifecycle.
 | Threat | Defense |
 |---|---|
 | An attacker calls `/sign` directly to mint a chain signature for a forged event. | `X-Caller-Spiffe` allowlist (`WARDEN_IDENTITY_SIGN_ALLOWED_CALLERS`). The identity service refuses signing requests from any SPIFFE ID not in the allowlist. |
-| An attacker calls `/svid` to mint a cert for an arbitrary `agent_id`. | The agent registry (WAO P5 — enforce mode) gates `/svid` on `(tenant, agent_name)` registration + lifecycle state. `unregistered_agent`, `agent_suspended`, `agent_decommissioned`, `scope_outside_envelope` all reject. |
+| An attacker calls `/svid` to mint a cert for an arbitrary `agent_id`. | The agent registry (enforce mode) gates `/svid` on `(tenant, agent_name)` registration + lifecycle state. `unregistered_agent`, `agent_suspended`, `agent_decommissioned`, `scope_outside_envelope` all reject. |
 | An attacker calls `/grant` to forge an OIDC delegation. | The IdP-issued bearer is verified against the trusted IdP's JWKS before any grant is minted. |
 | An attacker mints an A2A token for a foreign tenant. | `/actor-token` is gated on `WARDEN_IDENTITY_SIGN_ALLOWED_CALLERS`. Cross-tenant minting requires the federation bundle exchange. |
 
@@ -1775,7 +1775,7 @@ but the **signature** layer of v2/v3 is not. The deployment recovery
 posture is: rotate the signing key, re-issue SVIDs, force every agent
 to re-onboard. Documented in `RUNBOOKS.md` "identity service
 unreachable" with a follow-on "identity compromise" runbook
-**TODO: write that runbook as part of the next E5 slice.**
+**TODO: write that runbook as a follow-on supply-chain slice.**
 
 ### warden-console
 
@@ -1786,7 +1786,7 @@ agent registry.
 
 | Threat | Defense |
 |---|---|
-| An attacker accesses the console without operator auth. | E1 OIDC + WebAuthn (HIL holds passkeys; console proxies the ceremony). All routes except `/health` require an authenticated session. |
+| An attacker accesses the console without operator auth. | OIDC + WebAuthn (HIL holds passkeys; console proxies the ceremony). All routes except `/health` require an authenticated session. |
 | An attacker abuses the `/sim` panel to flood the simulator. | The `/sim` panel only proxies to `WARDEN_SIMULATOR_URL`; the simulator's admin server is unauthenticated and only loopback-bound by default. In production deployments the simulator is not deployed. |
 | An attacker tampers with the audit feed via SSE. | `/stream/audit` is read-only; the SSE stream is authenticated. |
 
@@ -1881,7 +1881,7 @@ same place every time:
 5. **Verification** — how to confirm recovery.
 6. **Escalation** — who to page if remediation fails.
 
-The Tier 3 observability stack (Prometheus `/metrics`, OTEL trace
+The observability stack (Prometheus `/metrics`, OTEL trace
 export, JSON logs) is the source of truth — every runbook leads with
 the metric or log line that confirms the failure rather than guessing
 from symptoms. See `repos/warden-*/README.md` per service for the
@@ -2024,7 +2024,7 @@ passes; export pipeline produces a fresh Iceberg snapshot with a
 matching `warden.parquet-sha256`.
 
 **Escalation.** Security lead **immediately** if tampering is
-suspected; dev lead otherwise. Tier 3 E6 (regulatory export) is the
+suspected; dev lead otherwise. The regulatory-export surface is the
 audience that cares — they get the chain hash as the integrity proof.
 
 ---
