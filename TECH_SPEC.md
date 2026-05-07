@@ -1,6 +1,6 @@
 # Warden Technical Specification
 
-Consolidated technical record for Agent Warden. Each major section below was previously a standalone spec file in this repo; cross-references in prose to former filenames (e.g. "see `IDENTITY.md` §3.3") now resolve to the matching section in this document.
+Consolidated technical record for Agent Warden. Each major section below was previously a standalone spec file in this repo; legacy cross-references in prose now resolve to the matching anchor in this document.
 
 `SECURITY.md` (RFC 9116-style disclosure policy) remains a separate file at the repo root by convention — it is referenced by `security.txt` and surfaced in the GitHub Security tab.
 
@@ -260,13 +260,13 @@ The §11.3 valuation claim (⭐⭐⭐⭐⭐, "zero-trust score" metric) and the 
 ## Agent onboarding (WAO)
 
 
-Companion to `IDENTITY.md`. Where `IDENTITY.md` covers how a *running* agent gets a cryptographic identity (SVID, grant, action signature, attestation), this spec covers the missing pre-step: how an agent gets *registered with the platform* in the first place — who declared it should exist, with what capabilities, owned by which team — and how that record gates every downstream identity operation.
+Companion to the [Identity service](#identity-service) section. Where that section covers how a *running* agent gets a cryptographic identity (SVID, grant, action signature, attestation), this spec covers the missing pre-step: how an agent gets *registered with the platform* in the first place — who declared it should exist, with what capabilities, owned by which team — and how that record gates every downstream identity operation.
 
 **Module status:** shipped. Extends `warden-identity` (no new service); introduces a new top-level CLI binary `wardenctl`; extends `warden-console` and `warden-ledger` (chain v3); touches `warden-e2e` and `warden-chaos-monkey`. Depends on the issuance, signing, and chain-version-negotiation primitives in the [Identity service](#identity-service) section.
 
 ### 1. What this closes
 
-`IDENTITY.md` makes the `agent_id` field cryptographically meaningful end-to-end. It does not say where the field comes from. Today, `POST /svid` mints an instance cert for *any* `(tenant, agent_name)` pair as long as attestation passes — first call wins. `POST /grant` accepts arbitrary opaque scope strings from the caller. There is no record of "this agent should exist, owned by this human/team, scoped to these capabilities" prior to issuance.
+The [Identity service](#identity-service) section makes the `agent_id` field cryptographically meaningful end-to-end. It does not say where the field comes from. Today, `POST /svid` mints an instance cert for *any* `(tenant, agent_name)` pair as long as attestation passes — first call wins. `POST /grant` accepts arbitrary opaque scope strings from the caller. There is no record of "this agent should exist, owned by this human/team, scoped to these capabilities" prior to issuance.
 
 The operational consequences:
 
@@ -353,7 +353,7 @@ Three states. Two reversible transitions, one terminal:
 - **Active → Suspended** is reachable by any owner-team member or any tenant admin. One-click pause for incident response.
 - **Suspended → Active** requires `agents:admin`. If the team that suspended themselves can also unsuspend themselves, the suspend lever doesn't survive a compromised team account.
 - **`* → Decommissioned`** requires `agents:admin`. Terminal. The row remains; the `(tenant, agent_name)` is permanently unreusable.
-- **Suspend is hard.** Existing SVIDs are revoked via the NATS revocation broadcast that `IDENTITY.md` §8 already needs (denylist consulted on `/sign`). Outstanding grants reject. There is no "soft suspend that lets in-flight requests run to TTL."
+- **Suspend is hard.** Existing SVIDs are revoked via the NATS revocation broadcast that [Identity service](#identity-service) §8 already needs (denylist consulted on `/sign`). Outstanding grants reject. There is no "soft suspend that lets in-flight requests run to TTL."
 
 #### 3.3 Ownership
 
@@ -490,7 +490,7 @@ The agent record is consulted in the same SQLite transaction as the issuance INS
 
 The principle: **registration is opt-in to enforcement**. The mode flag governs the *unknown* case (no record). Once a record exists, its envelope is enforced regardless of mode — otherwise registration in `warn` would be decorative. This lets operators onboard their highest-risk agents first, get real enforcement immediately on those, and let lower-risk agents run unregistered until the global flip.
 
-The signal vocabulary on the forensic event uses `unregistered_agent` (consistent with `peer_bundle_stale`, `grant_expired` naming from `IDENTITY.md`).
+The signal vocabulary on the forensic event uses `unregistered_agent` (consistent with `peer_bundle_stale` / `grant_expired` naming from the [Identity service](#identity-service) section).
 
 ### 7. Chain v3 — lifecycle row anchoring
 
@@ -654,7 +654,7 @@ The console has no "delete" verb. Decommission is terminal but the row stays. Th
 
 ### 12. Migration & rollout
 
-Five phases, mirroring `IDENTITY.md`'s phasing convention. Each independently shippable.
+Five slices, each independently shippable.
 
 1. **Schema + reads.** `agents` table created; `GET /agents`, `GET /agents/{id}`, `wardenctl agents list/get` work. `POST /agents` and lifecycle endpoints not yet wired. Mode flag defaults `off`. *Exit:* schema migration ships to all environments; SDK `Client::list_agents` callable.
 2. **Writes + lifecycle (no gating).** `POST /agents` and the lifecycle endpoints all work. Console `/agents`, `/agents/new`, `/agents/{id}` ship. `wardenctl agents create/suspend/...` ship. Mode still `off`. *Exit:* operators can enroll and manage records; nothing breaks because no gate consults them yet.
@@ -699,12 +699,12 @@ New scenarios. Each must produce a specific predicted verdict (the existing patt
 | `stale_oidc_token` | `id_token` past `exp` → `403 invalid_token` |
 | `migration_replay` | Run migration twice; second run is no-op; no duplicate ledger rows; no schema violation |
 
-Onboarding scenarios are pure-identity, no policy-tracker hits, so they run early in the chaos-monkey order — explicitly *before* the existing `velocity_breaker` scenario, which per `CLAUDE.md` must run last because the policy tracker records every `/evaluate`.
+Onboarding scenarios are pure-identity, no policy-tracker hits, so they run early in the chaos-monkey order — explicitly *before* the existing `velocity_breaker` scenario, which must run last because the policy tracker records every `/evaluate`.
 
 #### 13.3 Out of test scope
 
 - **Real IdP integration tests.** Real Okta/Entra tenants don't fit in CI; the dex mock is the contract. Real-IdP setup is a docs deliverable.
-- **Cross-tenant federation of agent records.** Agent records are tenant-local. Cross-tenant federation deals only with SPIFFE bundles (per `IDENTITY.md` §3.3). No behaviour to test.
+- **Cross-tenant federation of agent records.** Agent records are tenant-local. Cross-tenant federation deals only with SPIFFE bundles (per [Identity service](#identity-service) §3.3). No behaviour to test.
 - **Latency regression.** Adding `/agents` lookups on the `/svid` and `/grant` hot paths is real overhead; chasing latency budgets in CI is noisy. Document the expectation ("registered-agent gating adds <1ms p99 to `/svid`") and verify manually before the `enforce` flip.
 
 ### 14. Wire-contract changes (cross-repo grep before renaming)
@@ -735,7 +735,7 @@ The shared types are duplicated on each side of the wire (no shared crate, per r
 ## Console config page
 
 
-Companion to `ONBOARDING.md` only in form. Where `ONBOARDING.md` is a multi-service initiative with a chain version bump, a new CLI binary, and five rollout phases, this spec is the opposite end of the scale: one read-only HTML page at `/config` in `warden-console` that answers "what is this binary, what is it talking to, and is everything reachable?" — the implicit question every operator currently answers with `ps`, `printenv`, and `curl` against four URLs.
+Companion to the [Agent onboarding](#agent-onboarding-wao) section only in form. Where that section is a multi-service initiative with a chain version bump, a new CLI binary, and five rollout slices, this section is the opposite end of the scale: one read-only HTML page at `/config` in `warden-console` that answers "what is this binary, what is it talking to, and is everything reachable?" — the implicit question every operator currently answers with `ps`, `printenv`, and `curl` against four URLs.
 
 **Module status:** shipped. Local to `warden-console`; one additive change to `warden-sdk` (three new public getters). No new service. No chain version change. No new endpoints on any backend. The only cross-repo dependency is bumping the `warden-sdk` version `warden-console` consumes.
 
@@ -833,7 +833,7 @@ The identity row also surfaces:
 
 The "currently logged in" line is server-rendered, **not** JS-driven via `/auth/me`. JS-filled slots come out empty in `curl`, `wget`, headless screenshot capture, and view-source; the page is a screenshot artifact and must be self-contained. The nav stays JS-driven (separate concern; would otherwise require threading a `nav_user` field through every template).
 
-The Auth card does **not** surface the WebAuthn RP id — that's HIL's configuration, not the console's, and the console doesn't hold it. If `/config` ever needs to display backend configuration (per `ONBOARDING.md`-style federation), it goes through the §11 federated-config follow-on, not this card.
+The Auth card does **not** surface the WebAuthn RP id — that's HIL's configuration, not the console's, and the console doesn't hold it. If `/config` ever needs to display backend configuration (per [Agent onboarding](#agent-onboarding-wao)-style federation), it goes through the §11 federated-config follow-on, not this card.
 
 The card does **not** surface the active session count, the current session's `expires_at`, or the list of registered WebAuthn credentials. The first two are screenshot footguns (operational signal, hard to keep current with the lazy-expiry session map); the third lives in HIL's database and belongs on a separate "credentials" page if at all.
 
@@ -1010,7 +1010,7 @@ The v1 page does not include a "(future) Operator preferences" placeholder card.
 - **Build dirty marker.** Adds a second `git status --porcelain` invocation per build for marginal value; the SHA tells you the commit, and the dev case is the only one that benefits.
 - **Build timestamp.** Poisons reproducible builds. The release tag is the timestamp that matters.
 - **Policy bundle browse/edit.** Different feature, different route, different auth model.
-- **Tenant switcher.** Per `IDENTITY.md` §10 and `ONBOARDING.md` §10, console v1 is one-tenant-per-process. The config page reflects whatever the process booted with.
+- **Tenant switcher.** Per [Identity service](#identity-service) §10 and [Agent onboarding](#agent-onboarding-wao) §10, console v1 is one-tenant-per-process. The config page reflects whatever the process booted with.
 - **Auth gating on `/config`.** §2.1 explains why; making the diagnostic page require working auth is exactly backwards.
 - **An "Operator preferences" v1 placeholder card.** §10 explains why.
 
@@ -1256,7 +1256,7 @@ Lives under a new top-level `regulatory` verb (own surface — distinct from `ag
 ## Demo experience
 
 
-Companion to none of the existing specs in form. Where `CONFIG.md` is one read-only page and `ONBOARDING.md` is a multi-service initiative with a chain version bump, this spec sits between: a public demo surface that spans the marketing site, a Cloudflare Worker, the existing operator console, and three backend services, but introduces no new long-running service and no chain version change.
+Companion to none of the existing sections in form. Where [Console config page](#console-config-page) is one read-only page and [Agent onboarding](#agent-onboarding-wao) is a multi-service initiative with a chain version bump, this section sits between: a public demo surface that spans the marketing site, a Cloudflare Worker, the existing operator console, and three backend services, but introduces no new long-running service and no chain version change.
 
 **Module status:** new, marketing/funnel work. Extends `warden-website` (guided tour), `warden-console` (demo-mode), `warden-ledger` + `warden-hil` (token-scoped read filters and HIL approve enforcement), `warden-chaos-monkey` (extracted into a `warden-chaos-catalog` library + thin CLI wrapper). Adds one new artifact: a Cloudflare Worker for token mint. No new container in `docker-compose.yml`. No new chain version.
 
@@ -1496,8 +1496,8 @@ Repudiation, Information disclosure, Denial of service, Elevation of
 privilege.
 
 The architecture and wire contracts are the source of truth — see
-`CLAUDE.md` (`Cross-repo wire contracts`), `IDENTITY.md`, and
-`ONBOARDING.md` for the system shape this model is grounded in.
+the cross-repo wire contracts in the per-service READMEs, the
+[Identity service](#identity-service), and [Agent onboarding](#agent-onboarding-wao) sections for the system shape this model is grounded in.
 Re-verify against `git log` if the model and the code disagree; code
 wins.
 
@@ -1570,7 +1570,7 @@ defense-in-depth behind it.
 | Threat | Defense |
 |---|---|
 | Network MitM modifies the JSON-RPC body in flight. | mTLS provides record-layer integrity. Plaintext is never on the wire. |
-| An agent edits the `source` header to claim simulator origin. | `source` is metadata only, **not in the hashable**. Documented as untrusted in `CLAUDE.md`. The console's "hide simulated traffic" filter is convenience, not authorization. |
+| An agent edits the `source` header to claim simulator origin. | `source` is metadata only, **not in the hashable** — untrusted by design. The console's "hide simulated traffic" filter is convenience, not authorization. |
 | An agent sets `x-warden-actor-token` to bypass A2A verification. | Tokens are JWTs signed by the issuing identity; signature verification is what makes the bypass attempt fail, not the absence of the header. |
 
 #### Repudiation
@@ -1685,7 +1685,7 @@ SHA-256 hash-chained, SQLite-backed forensic store. Subscribes to
 
 | Threat | Defense |
 |---|---|
-| An attacker edits a row in the SQLite DB directly. | The hash chain detects it on the next `verify_chain` call — every entry's `entry_hash` covers the previous `prev_hash`, so any single-row edit invalidates every later row. Operator runbook (`RUNBOOKS.md` "ledger chain invalid") covers detection. |
+| An attacker edits a row in the SQLite DB directly. | The hash chain detects it on the next `verify_chain` call — every entry's `entry_hash` covers the previous `prev_hash`, so any single-row edit invalidates every later row. Operator runbook ("ledger chain invalid" in [Runbooks](#runbooks)) covers detection. |
 | An attacker adds a row claiming a forensic event that never happened. | Same — the new row has to satisfy the chain or it's detected. Chain v2/v3 rows carry per-action signatures from `warden-identity` `/sign`; an attacker forging both the chain and the signature needs the identity service's signing key. |
 | An attacker replays a NATS forensic message. | NATS at-least-once semantics already mean the ledger may see duplicate publishes. Each `LogRequest` is content-hashed; duplicate appends produce identical `entry_hash`, which `record_entry` deduplicates by `(correlation_id, source_layer)`. |
 
@@ -1773,7 +1773,7 @@ signature, every SVID, and every grant becomes attacker-controlled. The
 ledger chain itself is recoverable (deterministic from the prev rows),
 but the **signature** layer of v2/v3 is not. The deployment recovery
 posture is: rotate the signing key, re-issue SVIDs, force every agent
-to re-onboard. Documented in `RUNBOOKS.md` "identity service
+to re-onboard. Documented in [Runbooks](#runbooks) "identity service
 unreachable" with a follow-on "identity compromise" runbook
 **TODO: write that runbook as a follow-on supply-chain slice.**
 
