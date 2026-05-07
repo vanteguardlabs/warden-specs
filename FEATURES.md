@@ -62,7 +62,7 @@ curl -v https://localhost:8443/mcp     # ssl handshake failure
 ./repos/warden-e2e/run.sh              # tail logs for "mtls accept"
 ```
 
-Console `/audit` shows the resolved agent identity on every row, under the column labeled **`bot`** — that's the CN/SPIFFE identity threaded through (for SPIFFE-bearing certs the column renders just the `<name>` segment of `spiffe://.../agent/<name>/...`, not the full URI).
+Console `/audit` shows the resolved agent identity on every row, under the column labeled **`agent`** — that's the CN/SPIFFE identity threaded through (for SPIFFE-bearing certs the column renders just the `<name>` segment of `spiffe://.../agent/<name>/...`, not the full URI).
 
 ### 1.2 Security-first serial pipeline
 
