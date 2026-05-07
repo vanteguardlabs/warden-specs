@@ -12,6 +12,7 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 - [Operator authentication](#operator-authentication) — console + HIL human auth, RBAC, cross-channel identity
 - [Regulatory export](#regulatory-export) — EU AI Act Article 11/12 audit bundle
 - [Demo experience](#demo-experience) — public-facing demo design
+- [Console policy management](#console-policy-management) — read + CRUD + activate/deactivate of `*.rego` and `*.json` policies from the console
 - [Threat model](#threat-model) — STRIDE-organized, layer-by-layer
 - [Runbooks](#runbooks) — five on-call failure modes
 
@@ -1476,6 +1477,255 @@ The four operational tradeoffs that gate the green light, all confirmed:
 2. Single VPS, no HA, "best effort business hours" demo SLA is acceptable.
 3. `warden-chaos-catalog` extraction is in scope; chaos-monkey becomes a thin wrapper.
 4. Shared HS256 JWT secret across CF Worker + ledger + HIL is acceptable, rotated quarterly.
+
+---
+
+## Console policy management
+
+
+Companion to [Console config page](#console-config-page) (read-only diagnostic) and the policy-engine description in `README.md` §11.2 ("Layer 3 — The Law"). Where the config page exposes deployment metadata and four-backend health probes, this section adds a *write* surface: viewing, editing, activating, deactivating, and deleting the `*.rego` and `*.json` files that `warden-policy-engine` loads.
+
+**Module status:** designed; not yet shipped. Touches `warden-policy-engine` (new SQLite-backed policy store, write API, atomic engine rebuild, outbox to NATS), `warden-console` (new `/policies` surface, new `Role::Admin`), `warden-sdk` (typed client for the new endpoints), and `warden-ledger` (consumes new `policy.*` chain v3 event kinds — no schema bump, chain v3 is event-kind-polymorphic).
+
+Design decided by a `/grill-me` walkthrough. Eight architectural decisions resolved in sequence. This doc is the consolidated record so the implementation work can begin from a stable baseline.
+
+### 1. What this closes
+
+`warden-policy-engine` today loads `policies/*.rego` + `policies/*.json` from disk via `build_engine_from_dir` at boot, then never re-reads them. The operational consequences:
+
+| Gap | Today | After this section |
+|---|---|---|
+| Visibility | Operators read policies by `cat`-ing the container filesystem or browsing GitHub | `/policies` page lists every loaded policy with state, version, last editor |
+| Tuning the allowlist | `attestation_allowlist.json` edit = PR + redeploy of policy-engine for a one-line "approve `delete_repo` at measurement `abc123`" | One textarea edit, atomic engine rebuild, no redeploy |
+| Emergency rule changes | "Disable bulk-export business-hours rule for the maintenance window" requires a code push | Single Admin click toggles the rule's `active` flag |
+| Audit trail of policy changes | `git log` on the policy directory; no anchor in the chain | Every mutation lands as a chain v3 lifecycle row with operator OIDC sub + reason |
+| Rollback | Revert PR + redeploy | One-click "rollback to version N" against the version-history table |
+
+The console UI is *not* a rule editor for non-engineers — it's still a rego textarea, the audience is still operators familiar with rego. The value is collapsing the change-loop from "PR + redeploy" to "edit + Save" while strengthening the audit trail.
+
+### 2. Scope and non-goals
+
+**In scope (v1):**
+
+- File-level granularity: `governance.rego`, `attestation.rego`, `attestation_allowlist.json`, plus any new file an Admin creates.
+- Two content types: `rego` (logic; validated via regorus compile) and `json` (data documents; validated via per-name JSON Schema).
+- CRUD: create, read (current + any historical version), update (with diff modal), soft delete, activate, deactivate, rollback to a prior version.
+- Append-only version history per policy.
+- Required free-text `reason` on every mutation.
+- Atomic engine rebuild: no in-flight `/evaluate` is interrupted; new requests after the swap see the new policy set.
+- Outbox-backed durable chain v3 anchoring for every mutation.
+
+**Explicitly out of scope (v1 non-goals):**
+
+- Rule-level toggles inside a file (would require either rego AST rewriting or per-rule feature flags; defer until file-level granularity proves insufficient).
+- Splitting `governance.rego` into per-axis files (`governance_denylist.rego`, `governance_velocity.rego`, …); a separate refactor with its own rollback story.
+- Two-person approval (4-eyes) for deactivation/delete of "critical" policies; the v1 defense is `Admin` role + chain audit + required reason.
+- Multi-replica `warden-policy-engine` consistency (NATS-KV invalidation à la velocity tracker); v1 ships single-replica.
+- Codemirror / Monaco editor; v1 uses plain `<textarea>` and leans on regorus error messages for syntax feedback.
+- Golden-test corpus gate on save; the chaos-monkey suite is *almost* this corpus today, but promoting it into a pre-save hook is its own project.
+- Git-backed policy storage (PR-review workflow); a different product than the console-CRUD shape we're building.
+- Higher-level DSL on top of rego (structured forms generating rego); ditto.
+
+### 3. Service architecture
+
+The write surface lives on `warden-policy-engine`. Console is a thin UI layer calling `warden-sdk` → policy-engine, matching the existing pattern where each service owns its own state (HIL owns pending decisions, identity owns agent records, ledger owns chain rows).
+
+Three reasons over a console-owned model:
+
+1. **Atomicity.** The new policy must compile, the regorus engine must rebuild, the SQLite write must commit, and the outbox row must be written — as a single failure domain. Splitting storage across services adds a window where storage and engine disagree.
+2. **Pattern match.** Identity emits chain v3 lifecycle rows for agent state changes through its own outbox; policy mutations follow the same pattern.
+3. **Boot-time integrity.** Engine has to rebuild from its own SQLite anyway; co-locating eliminates a network hop on every restart.
+
+Single replica in v1. Multi-replica adds a NATS-KV-backed invalidation channel (mirroring `NatsKvTracker` for velocity) — deferred.
+
+### 4. Data model (SQLite)
+
+```sql
+CREATE TABLE policies (
+  name TEXT PRIMARY KEY,
+  content_type TEXT NOT NULL CHECK (content_type IN ('rego','json')),
+  active INTEGER NOT NULL,                   -- 0 / 1
+  current_version INTEGER NOT NULL,
+  deleted_at TIMESTAMP NULL,                 -- soft delete tombstone
+  created_at TIMESTAMP NOT NULL,
+  updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE policy_versions (
+  name TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  body_sha256 TEXT NOT NULL,
+  reason TEXT NOT NULL,                      -- required on every mutation
+  actor_sub TEXT NOT NULL,
+  actor_idp TEXT NOT NULL,
+  chain_seq INTEGER NULL,                    -- nullable until ledger acks
+  created_at TIMESTAMP NOT NULL,
+  PRIMARY KEY (name, version),
+  FOREIGN KEY (name) REFERENCES policies(name)
+);
+
+CREATE TABLE policy_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  payload_json TEXT NOT NULL,                -- canonical chain v3 LogRequest
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NULL,
+  created_at TIMESTAMP NOT NULL,
+  delivered_at TIMESTAMP NULL
+);
+```
+
+`policies.current_version` is the only mutable column on the `policies` row that affects engine state (alongside `active`). The version table is append-only — rollback creates a new version whose body matches an older one, not by mutating `current_version` to point backwards. Reasons: (i) chain-side, every state change is an event with `prev_sha256` → `new_sha256`; (ii) the version-table sequence is monotonic, easier to reason about than a directed cycle.
+
+### 5. Wire API (`warden-policy-engine`)
+
+```
+GET    /policies                                  list (Viewer)
+GET    /policies/{name}                           current + metadata (Viewer)
+GET    /policies/{name}/versions                  version timeline (Viewer)
+GET    /policies/{name}/versions/{n}              historical body (Viewer)
+GET    /policies/{name}/diff?from=N&to=M          unified diff (Viewer)
+
+POST   /policies                                  create (Admin)
+PUT    /policies/{name}                           update (Admin)
+POST   /policies/{name}/activate                  (Admin)
+POST   /policies/{name}/deactivate                (Admin)
+DELETE /policies/{name}                           soft delete (Admin)
+POST   /policies/{name}/rollback/{version}        (Admin)
+```
+
+All write requests carry a JSON body with `{reason: string, expected_current_version: int}` (create omits `expected_current_version`; rollback's body shape is `{reason}` only).
+
+Failure modes:
+- `400 Bad Request` — regorus compile error (rego) or JSON Schema validation error (json). Body carries the parser error verbatim.
+- `409 Conflict` — `expected_current_version` doesn't match `policies.current_version`. Response body includes the new current version's metadata so the UI can prompt "policy was changed since you opened the editor; reload?".
+- `403 Forbidden` — caller lacks `Admin` role.
+- `503 Service Unavailable` — outbox or NATS unreachable past retry budget; the SQLite + engine state is consistent, but the chain row hasn't landed yet. (Not surfaced in v1's happy path; documented for completeness.)
+
+### 6. Save flow
+
+The order matters for crash safety. For a `PUT /policies/{name}`:
+
+1. **Validate.** Compile rego via a throwaway `Engine::new()` + `add_policy`, or validate JSON against the per-name JSON Schema. Reject with `400` on failure; no state mutation.
+2. **Build candidate.** Construct a fresh full-set `Engine` from SQLite's current active set with the new body substituted. Slow path (tens of ms for the full policy directory), runs *outside* the live `Mutex<Engine>`.
+3. **Persist.** Begin SQLite transaction:
+   - Insert `policy_versions` row for the new version.
+   - Update `policies.current_version` (and `active` for activate/deactivate).
+   - Insert `policy_outbox` row carrying the canonical chain v3 `LogRequest` payload.
+   - Commit.
+4. **Swap engine.** Take `Mutex<Engine>` lock; `*guard = candidate_engine`; release. Total lock-hold time is one struct assignment (microseconds). In-flight evaluations finish on the old engine; new ones see the new one.
+5. **Respond.** Return `200` with the new version metadata.
+6. **Outbox drain.** A background worker drains `policy_outbox`, publishes to NATS subject `warden.forensic`, and writes back `chain_seq` on the version row when the ledger acks.
+
+Crash safety: if the process crashes between step 3's commit and step 4's swap, on reboot the engine rebuilds from SQLite, which already reflects the new state. Self-heals. No double-emit risk because step 6 is decoupled and idempotent (the outbox row carries a stable `id`; the ledger dedupes by chain row content if the worker retries after a partial publish).
+
+### 7. Audit + chain integration
+
+Every mutation publishes a chain v3 lifecycle row through the outbox. Event kinds:
+
+- `policy.created`
+- `policy.updated`
+- `policy.activated`
+- `policy.deactivated`
+- `policy.deleted`
+
+Each row carries `payload_sha256` over a canonical JSON object:
+
+```json
+{
+  "name": "attestation.rego",
+  "content_type": "rego",
+  "prev_sha256": "…",        // null for policy.created
+  "new_sha256": "…",         // matches policy_versions.body_sha256
+  "reason": "approve dev-binary-hash for delete_repo per #INC-2138"
+}
+```
+
+Standard chain v3 fields (`actor_sub`, `actor_idp`, `seq`, `prev_hash`, `signature`, `key_id`) are populated as for any other chain v3 row. `actor_sub` and `actor_idp` come from the OIDC session of the operator who clicked Save. The `reason` field is non-optional; the API rejects `400 Bad Request` on empty or whitespace-only input.
+
+The ledger doesn't need a schema change. Chain v3's `HashableEntryV3` is event-kind-polymorphic via `payload_sha256` — adding `policy.*` event kinds is mechanical.
+
+### 8. Authorization
+
+Adds a third role to the existing two-role hierarchy in `warden-console/src/auth_session.rs`:
+
+```rust
+pub enum Role {
+    Viewer,
+    Approver,
+    Admin,    // new
+}
+```
+
+Hierarchy: `Viewer < Approver < Admin`. `Role::has(target)` is updated so `Admin` is a strict superset of both.
+
+`RoleMap` gains an `admin_groups: Vec<String>` field, mirroring the existing `approver_groups` and `viewer_groups`. Resolution priority becomes admin > approver > viewer. Group mapping in console config:
+
+```yaml
+auth:
+  oidc:
+    admin_groups: ["warden-policy-admins"]
+    approver_groups: ["security-team", "finance-ops"]
+    viewer_groups: ["engineering", "compliance"]
+```
+
+A new `require_admin` gate guards every console-side write route (`POST/PUT/DELETE` on `/policies`); `require_viewer` continues to guard reads. The HIL pattern is reused: the `/policies` template carries a `can_edit_policies` flag, and the action buttons (Edit / Activate / Deactivate / Delete / Rollback) are rendered only when true. Viewers and Approvers see the policy list and bodies but no buttons.
+
+`disabled` mode promotes the synthetic session to `Admin` (matching how it already promotes to `Approver`), so dev / CI flows work without OIDC wiring.
+
+**Fail-closed on missing OIDC mapping.** If `admin_groups` is unset and console isn't in `disabled` mode, no operator gets `Admin`. Existing Approvers are *not* silently promoted. Operators must consciously add the group mapping. Mirrors the loud-fail-boot principle from §10 below.
+
+### 9. Console UI
+
+Five Askama templates under `repos/warden-console/templates/`:
+
+- `policies.html` — list page. Table columns: name, content_type, state (active / inactive / deleted chip), current version, last updated by, last updated at. Filter chips for state. Active and inactive visible by default; deleted hidden behind a "show deleted" toggle. Action buttons rendered behind `can_edit_policies`.
+- `policies_new.html` — Admin-only create form. Name + content_type radio + textarea + reason field.
+- `policies_detail.html` — view page. Current body in a syntax-highlighted block (server-rendered with class hints for prism.js or similar). Lifecycle timeline sidebar mirroring `agents_detail.html`: every chain v3 row for this policy, oldest first, with "view diff" links. "Edit" button links to the edit page.
+- `policies_edit.html` — Admin-only. Plain `<textarea>` (no client-side editor in v1). Reason field. Form submits via htmx; server returns either the updated detail page or an error fragment with the regorus / JSON Schema error inline.
+- `policies_diff.html` — unified-diff view. Reusable for "edit confirmation modal" (current vs. proposed) and "audit history view" (version N vs. version M).
+
+The confirm-diff modal on save (§3 of Q3) is implemented as: form submits to a `POST /policies/{name}/preview` endpoint (server-side, no SQLite write); response is an htmx-swapped modal showing the diff with a "Confirm and save" button that POSTs to the actual `PUT /policies/{name}`. Two-step interaction; no client-side diffing.
+
+URL paths:
+
+```
+/policies                               list
+/policies/new                           create form (Admin only)
+/policies/{name}                        detail
+/policies/{name}/edit                   edit form (Admin only)
+/policies/{name}/versions/{n}           historical body
+/policies/{name}/diff?from=N&to=M       unified diff
+```
+
+### 10. Boot-time integrity + initial seed
+
+On boot, after loading the persisted policy set from SQLite, `warden-policy-engine` attempts the engine build *before* binding the HTTP port. If the build fails (regorus version bump rendered an old policy uncompilable, or someone hand-edited SQLite into invalidity), the process exits non-zero with the regorus error. No fallback to the bundled `policies/*.rego` files. No fallback to no-policies. Loud failure is correct: silent fallback would mask the divergence.
+
+**Initial seed.** First boot with an empty `policies` table: ingest the on-disk `policies/*.rego` and `policies/*.json` files as version 1 of each, with `active=true`, `actor_sub="system"`, `actor_idp="bootstrap"`, `reason="initial seed from disk"`. Subsequent boots are no-ops (table non-empty). This is how today's deployments migrate without a separate seeding step.
+
+### 11. Out of scope for v1
+
+These emerge during build, not at design time:
+
+- Whether the syntax-highlighting class hints in `policies_detail.html` should target prism.js, highlight.js, or skip highlighting and rely on monospace alone.
+- Specific JSON Schema content for `attestation_allowlist.json` (the `additionalProperties: false` shape, allowed key patterns, etc.).
+- Retention policy for `policy_versions` (keep all vs. prune after N days). v1 ships "keep all"; revisit when version-table size becomes operationally interesting.
+- Whether create-form name validation enforces a regex or accepts any string; v1 takes any string but warns on non-matching `^[a-z0-9_]+\.(rego|json)$`.
+- How `wardenctl` exposes policy management (probably `wardenctl policies list / get / edit …` mirroring `wardenctl agents …`); deferred until the console flow stabilizes.
+
+### 12. Confirmed before writing code
+
+The eight architectural decisions resolved by the `/grill-me` walkthrough, all confirmed:
+
+1. File-level granularity (not rule-level, not DSL-on-top).
+2. Write API on `warden-policy-engine` with single-replica SQLite (not console-owned, not external bundle service).
+3. Atomic rebuild on save + diff modal + loud-fail boot (not draft+activate, not golden-test gate).
+4. Both `*.rego` and `*.json` in scope, with per-name JSON Schema validation (not rego-only, not bundled with file split).
+5. Append-only version table + chain v3 lifecycle events + soft delete (not chain-only audit, not content-addressed blob store).
+6. New `Role::Admin` at top of hierarchy, Viewer reads + Admin writes, fail-closed on missing OIDC mapping (not reuse Approver, not per-policy ACL).
+7. Required free-text `reason` on every mutation; defer two-person approval (not no-guardrails, not critical-policy-only protection).
+8. Build-then-persist-then-swap ordering, optimistic concurrency via `expected_current_version`, boot-time integrity check (not pessimistic locking, not last-write-wins).
 
 ---
 
