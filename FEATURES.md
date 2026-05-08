@@ -179,6 +179,51 @@ curl http://localhost:8083/verify    # still valid after vacuum
 
 This is mostly a disk-pressure relief feature; day-1 deployments don't need it (~3.5 GB/year at 10k rows/day).
 
+### 1.9 Policy mutability — SQLite store + write API + outbox
+
+**Concept.** Policy used to be configured by editing `policies/*.rego` and `policies/*.json` on disk and redeploying the policy engine. Two operational gaps fell out: the only audit trail was `git log` (no anchor in the chain), and tuning the attestation allowlist for a single new measurement still meant a code push. The mutability surface closes both — every policy now lives in SQLite alongside an append-only version table; mutations land via a typed API; the engine atomically rebuilds without dropping in-flight `/evaluate` calls; every change anchors as a `policy.*` chain v3 row through a durable outbox. The console UI is *not* a no-code editor — operators still write rego — but the change loop collapses from "PR + redeploy" to "edit + Save" with a stronger audit trail. Rollback is one-click against the version-history table.
+
+**Implementation.** `warden-policy-engine` modules: `storage.rs` (SQLite-backed `policies` + `policy_versions` + `policy_outbox` tables), `validation.rs` (regorus compile gate for `rego` content type, JSON Schema gate for `json`), `write_api.rs` (the create/update/state/rollback/delete handlers), `outbox_worker.rs` (drains `policy_outbox` to NATS `warden.forensic`). Wire surface (Viewer reads, Admin writes):
+
+```
+GET    /policies                              list (Viewer)
+GET    /policies/{name}                       current + metadata (Viewer)
+GET    /policies/{name}/versions              version timeline (Viewer)
+GET    /policies/{name}/versions/{n}          historical body (Viewer)
+GET    /policies/{name}/diff?from=N&to=M      unified diff (Viewer)
+POST   /policies                              create (Admin)
+PUT    /policies/{name}                       update (Admin)
+POST   /policies/{name}/activate              (Admin)
+POST   /policies/{name}/deactivate            (Admin)
+DELETE /policies/{name}                       soft delete (Admin)
+POST   /policies/{name}/rollback/{version}    (Admin)
+```
+
+Write requests carry `{reason: string, expected_current_version: int}` (required `reason` is the human-readable change rationale; `expected_current_version` enables 409-on-conflict optimistic concurrency so two operators editing the same policy can't silently clobber each other). Failure shapes: `400` for parse/validation errors (regorus error returned verbatim), `409` `policy_version_conflict` with the new metadata so the UI can prompt "policy was changed since you opened the editor; reload?", `403` for `Admin`-gated routes called by lower roles. Boot ingestion: if the `policies` table is empty, `build_engine_from_dir` reads `policies/*` from disk into SQLite once; subsequent boots load directly from SQLite. The chain side is event-kind-polymorphic — no v4 bump needed; new event kinds are `policy.created`, `policy.updated`, `policy.activated`, `policy.deactivated`, `policy.deleted`, `policy.rollback`.
+
+**Verify.**
+
+```bash
+./repos/warden-e2e/run-policies.sh
+# Boots policy-engine + ledger + NATS, drives the full mutation surface
+# end-to-end, asserts every mutation lands as a policy.* chain v3 row
+# and the chain still verifies after each.
+```
+
+For the console UI counterpart, see §4.10.
+
+### 1.10 Audit-agent fan-out (`GET /agents`)
+
+**Concept.** The console's `/audit` page wants to default to "show me every agent that's ever logged a row" when no search criteria are typed. Computing that list from chain rows on every page load is wasteful; a small endpoint that returns the distinct CN/SPIFFE-name set is cheap and cacheable. Used in tandem with the simulator's roster so transient demo agents and real agents both appear in the default fan-out.
+
+**Implementation.** `GET /agents` on `warden-ledger`. Reads via `list_distinct_audit_agent_ids` against the `audit` table, returns `{ agents: [...] }`. SDK side: `LedgerClient::list_agents() -> Vec<String>`. Console fan-out: `(sim_roster_from_admin) ∪ (ledger /agents response)`.
+
+**Verify.**
+
+```bash
+curl http://localhost:8083/agents | jq .agents
+```
+
 ---
 
 ## 2. HIL — human-in-the-loop
@@ -426,7 +471,7 @@ WARDEN_IDENTITY_REGISTRATION_MODE=enforce
 
 **Concept.** The primary investigation surface. Every forensic row from every layer rendered in chronological order, joinable by `correlation_id`. An operator investigating an incident lands here, filters to a time window or a `correlation_id`, and sees the full bundle: proxy verdict, policy decision, HIL state transitions (if any), identity signature.
 
-**Implementation.** `warden-console/src/handlers.rs::audit`. Reads from `warden-ledger` via `warden-sdk::LedgerClient`. Joins related rows by `correlation_id`. Filter chips for signal column (`unregistered_agent`, `peer_bundle_stale:*`, `grant_expired`, etc.). The "Hide simulated traffic" filter joins by `correlation_id` so all sim-driven rows (proxy + policy + HIL) hide together — the `source` column on the forensic event is metadata; only the proxy's first event sets it, but the join means downstream rows hide too.
+**Implementation.** `warden-console/src/handlers.rs::audit`. Reads from `warden-ledger` via `warden-sdk::LedgerClient`. Joins related rows by `correlation_id`. Filter chips for signal column (`unregistered_agent`, `peer_bundle_stale:*`, `grant_expired`, etc.). The "Hide simulated traffic" filter joins by `correlation_id` so all sim-driven rows (proxy + policy + HIL) hide together — the `source` column on the forensic event is metadata; only the proxy's first event sets it, but the join means downstream rows hide too. Default agent fan-out when no search criteria are typed = `(simulator roster) ∪ (LedgerClient::list_agents())`. Timestamps render in the browser's local timezone (rather than ledger UTC) so an operator in Berlin doesn't have to do mental arithmetic during an incident.
 
 **Verify.**
 
@@ -554,6 +599,21 @@ curl -i http://localhost:8085/stream/audit
 # HTTP/1.1 401 Unauthorized
 ```
 
+### 4.10 Policy management (`/policies`)
+
+**Concept.** Browser-side counterpart to §1.9. Lists every loaded policy with its state (active/inactive, current version, last editor, last reason). Click into a policy for the textarea editor, the diff modal against any historical version, and one-click activate / deactivate / rollback / delete. Required free-text reason on every mutation — the chain row gets it verbatim. Read views are Viewer-or-better; every mutation is `Role::Admin`-gated server-side, with the buttons hidden client-side for lower roles.
+
+**Implementation.** `warden-console` `/policies` (index), `/policies/new` (create form), `/policies/{name}` (detail + history), `/policies/{name}/edit` (textarea editor), `/policies/{name}/diff?from=N&to=M` (unified diff), plus `POST` handlers for activate / deactivate / rollback and `DELETE` for soft-delete. All call `warden-sdk::PoliciesClient`. Optimistic concurrency: the edit form carries a hidden `expected_current_version`; the conflict response (`409 policy_version_conflict`) renders an htmx flash with "policy was changed since you opened the editor; reload?". Validation errors (regorus compile failure, JSON Schema mismatch) render below the textarea verbatim, including line/column markers from the parser.
+
+**Verify.**
+
+```bash
+open http://localhost:8085/policies
+# Edit a rego file, save with reason — chain v3 row lands in /audit
+```
+
+End-to-end coverage in `./repos/warden-e2e/run-policies.sh` (see §11.7).
+
 ---
 
 ## 5. Operator authentication
@@ -613,11 +673,11 @@ open http://localhost:8085/login
 # Redirects to Keycloak, returns with session
 ```
 
-### 5.5 RBAC (viewer / approver)
+### 5.5 RBAC (viewer / approver / admin)
 
-**Concept.** Two static roles. `viewer` = read-only across the console. `approver` = viewer + ability to decide HIL pending items. No admin role in the console — admin operations go through `wardenctl` + direct identity API. No runtime role exceptions — the IdP's `groups` claim is the source of truth, mapped via config-as-code.
+**Concept.** Three static roles, monotonically increasing capability. `viewer` = read-only across the console. `approver` = viewer + ability to decide HIL pending items. `admin` = approver + the policy-management write surface (§4.10). No runtime role exceptions — the IdP's `groups` claim is the source of truth, mapped via config-as-code. Out-of-band admin operations on the agent registry still go through `wardenctl` + direct identity API.
 
-**Implementation.** `OidcGroupMap { approver_groups: Vec<String>, viewer_groups: Vec<String> }` in `warden-console/src/auth_session.rs`. Configured via env CSV. Session carries the resolved role; `require_viewer` and `require_approver` middleware check it.
+**Implementation.** `OidcGroupMap { admin_groups, approver_groups, viewer_groups: Vec<String> }` in `warden-console/src/auth_session.rs`. Configured via env CSV. Session carries the resolved `Role::{Admin, Approver, Viewer}`; ordering is encoded in `Role::at_least(other)`. Middleware: `require_viewer` (read), `require_approver` (HIL decide), policy mutations check `Role::Admin` inline.
 
 **Verify.**
 
@@ -988,7 +1048,7 @@ cargo run -p warden-lite -- --listen 127.0.0.1:8443
 
 **Concept.** The typed Rust client. Two artifacts share one source of truth: `warden-console` consumes it, `wardenctl` consumes it, external integrators consume it. SDK is the contract.
 
-**Implementation.** `repos/warden-sdk/`. Clients: `LedgerClient`, `HilClient`, `SimClient`, `AgentsClient`. Each exposes `base_url() -> &Url` for the `/config` page redaction-safe readout. `AgentsClient::bearer_fingerprint() -> Option<String>` returns sha256[..8] hex of the configured token (never the raw token).
+**Implementation.** `repos/warden-sdk/`. Clients: `LedgerClient`, `HilClient`, `SimClient`, `AgentsClient`, `PoliciesClient`. Each exposes `base_url() -> &Url` for the `/config` page redaction-safe readout. `AgentsClient::bearer_fingerprint() -> Option<String>` returns sha256[..8] hex of the configured token (never the raw token). `LedgerClient::list_agents()` powers the audit page's default fan-out (§4.1). `PoliciesClient` is `Clone`-able and exposes the full Viewer/Admin surface described in §1.9; conflict responses parse via `PoliciesClient::parse_conflict()` so callers can surface the new metadata to operators.
 
 **Verify.** Cargo dep:
 
@@ -1057,9 +1117,9 @@ E2E_KEEP_LOGS=1 ./repos/warden-e2e/run.sh         # debug
 
 ### 11.4 Compose stack (`--profile stack`)
 
-**Concept.** The console-with-data demo. Boots everything in containers + the simulator + upstream-stub; surfaces a populated console for screenshots, evaluator walkthroughs, and operator practice.
+**Concept.** The console-with-data demo. Boots everything in containers + the simulator + upstream-stub; surfaces a populated console for screenshots, evaluator walkthroughs, and operator practice. Identity boots in `enforce` registration mode end-to-end so the demo matches the production default.
 
-**Implementation.** `repos/warden-e2e/docker-compose.yml --profile stack`. First cold build is ~15 min (release profile, no shared cargo target across the six service Dockerfiles). Subsequent runs are image-cached. `run-stack-smoke.sh` is the lighter health check.
+**Implementation.** `repos/warden-e2e/docker-compose.yml --profile stack`. First cold build is ~15 min (release profile, no shared cargo target across the six service Dockerfiles). Subsequent runs are image-cached. `run-stack-smoke.sh` is the lighter health check; `run-stack-e2e.sh` is the full assertion suite (see §11.8).
 
 **Verify.**
 
@@ -1095,7 +1155,7 @@ Identity scenarios accept either a wired (proxy + identity) or unwired (proxy on
 
 **Concept.** Continuous, persona-driven mTLS load generator. Mints per-agent client certs from the proxy's CA, fires a Poisson-distributed mix of MCP tool calls (auto-allow + Yellow-tier wire_transfer + drift into hard-deny), and runs an HIL auto-decision sidecar at configurable approve/deny/expire ratios. Every request carries `x-warden-source: simulator` so the proxy stamps `source="simulator"` on the forensic event.
 
-**Implementation.** `repos/warden-simulator/`. Admin server (`SIM_ADMIN_PORT=9100`, default loopback-only): `GET /status`, `POST /multiplier`, `POST /running`, `POST /auto-decide`, `POST /agents`. Boots paused — operator clicks Start on the console (or sets `SIM_START_RUNNING=true` / `--start-running`) to fire traffic. HIL auto-decision sidecar boots **enabled** when `--hil-url` is set and is pausable; pausing leaves Yellow-tier pendings on the HIL queue for manual approval.
+**Implementation.** `repos/warden-simulator/`. Admin server (`SIM_ADMIN_PORT=9100`, default loopback-only): `GET /status`, `POST /multiplier`, `POST /running`, `POST /auto-decide`, `POST /agents`. Boots paused — operator clicks Start on the console (or sets `SIM_START_RUNNING=true` / `--start-running`) to fire traffic. HIL auto-decision sidecar boots **enabled** when `--hil-url` is set and is pausable; pausing leaves Yellow-tier pendings on the HIL queue for manual approval. Each persona is **enrolled in the agent registry before its first SVID is minted** — required for the stack's `enforce` registration mode (an unregistered name would otherwise hit `403 unregistered_agent`).
 
 The `warden-upstream-stub` sub-binary is what compose uses as the proxy's downstream MCP echo target.
 
@@ -1106,6 +1166,31 @@ docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d
 curl -X POST http://localhost:9100/running -d '{"running":true}'
 open http://localhost:8085/audit
 # Sim traffic streams in
+```
+
+### 11.7 `warden-e2e/run-policies.sh`
+
+**Concept.** Console policy management e2e. Boots a minimal stack (`warden-policy-engine` + `warden-ledger` + NATS — no proxy/brain/HIL/identity) and drives the full mutation surface end-to-end: list, create, update with optimistic concurrency, deactivate / activate, rollback, soft delete. After every mutation, asserts a matching `policy.*` row landed in the ledger via `warden.forensic` and the chain still verifies. Mirrors `run-onboarding.sh`'s shape: focused on the §1.9 / §4.10 wire contract, not the full MCP path.
+
+**Implementation.** `repos/warden-e2e/run-policies.sh`. Same prereqs as `run.sh` (cargo / curl / jq / NATS). Honors `E2E_KEEP_LOGS=1` and dumps tails on failure.
+
+**Verify.**
+
+```bash
+./repos/warden-e2e/run-policies.sh
+```
+
+### 11.8 `warden-e2e/run-stack-e2e.sh`
+
+**Concept.** Same assertion depth as `run.sh` (correlation_id join, chain `/verify`, HIL Yellow-tier roundtrip, chaos-monkey red-team suite) but against the docker-compose `--profile stack` containers instead of the host-cargo debug build. Use this when iterating on Dockerfile / compose changes — `run-stack-smoke.sh` only proves the demo is healthy; `run-stack-e2e.sh` proves the production-style image build still passes the full suite.
+
+**Implementation.** `repos/warden-e2e/run-stack-e2e.sh`. Does **not** boot any service — expects the compose stack already running. PIDs / boot harness from `run.sh` are absent. `E2E_SKIP_CHAOS=1` skips the red-team tail.
+
+**Verify.**
+
+```bash
+docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d
+./repos/warden-e2e/run-stack-e2e.sh
 ```
 
 ---
@@ -1224,6 +1309,22 @@ curl -X POST http://localhost:8081/inspect -H 'content-type: application/json' \
 **Wire.** NATS publish via the identity-side outbox (`agents_ledger.rs`). Durable retry. Ledger dispatches v3 rows through `HashableEntryV3` keyed on `event_kind` + `payload_sha256`.
 
 **Verify.** See §3.11.
+
+### 13.6 Console → Policy-engine (mutations)
+
+**Concept.** The console's `/policies` write surface (§4.10) and the `wardenctl` policy commands talk to `warden-policy-engine`'s mutation API; mutations anchor in chain v3 via the policy-engine outbox.
+
+**Wire.** Endpoints listed in §1.9. Optimistic-concurrency body: `{reason: string, expected_current_version: int}`. Conflict response: `409 policy_version_conflict` with the new metadata so the UI can prompt-and-reload. Authz: every `POST/PUT/DELETE` requires `Role::Admin`. `policy.*` event kinds dispatch to chain v3 — no v4 bump (the chain is event-kind-polymorphic).
+
+**Verify.** See §1.9, §11.7.
+
+### 13.7 Console / `wardenctl` → Ledger (audit fan-out)
+
+**Concept.** The console and CLI need the canonical "every agent that has ever logged a row" set for default audit fan-out and for `wardenctl agents list` joins.
+
+**Wire.** `GET /agents` on `warden-ledger`. Body: `{ agents: ["spiffe-name-or-cn", ...] }` (string list, NFC-normalized lowercase, deduplicated and sorted). SDK helper: `LedgerClient::list_agents()`.
+
+**Verify.** See §1.10, §4.1.
 
 ---
 
