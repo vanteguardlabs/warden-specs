@@ -22,14 +22,10 @@ The control plane for the agentic enterprise: a zero-trust security, governance,
 11. [Product extensions: FinOps, routing, identity](#11-product-extensions-finops-routing-identity)
 12. [Compliance: EU AI Act articles 12, 14, 15](#12-compliance-eu-ai-act-articles-12-14-15)
 13. [Competitive landscape](#13-competitive-landscape)
-14. [Go-to-market: the first ten customers](#14-go-to-market-the-first-ten-customers)
 15. [Pricing & revenue model](#15-pricing--revenue-model)
 16. [Security hardening & bypass prevention](#16-security-hardening--bypass-prevention)
-17. [24-month roadmap to acquisition](#17-24-month-roadmap-to-acquisition)
-18. [M&A targets & exit strategy](#18-ma-targets--exit-strategy)
 19. [Risk management & operational resilience](#19-risk-management--operational-resilience)
 20. [The next horizon: wow factors for 2026–2027](#20-the-next-horizon-wow-factors-for-20262027)
-21. [Conclusion: the trust dividend](#21-conclusion-the-trust-dividend)
 22. [Implementation status](#22-implementation-status)
 
 ---
@@ -590,48 +586,6 @@ Warden turns security into **scale** — the platform that lets a company go fro
 
 ---
 
-## 14. Go-to-market: the first ten customers
-
-Per Microsoft's 2026 Cyber Pulse report, 80% of Fortune 500 companies have deployed active agents — and nearly half lack systematic security controls. We target regulated giants and customer-experience pioneers.
-
-### 14.1 Target archetypes
-
-| Sector         | Companies                       | Use case                                                | Pain                                                              |
-|----------------|----------------------------------|---------------------------------------------------------|-------------------------------------------------------------------|
-| FinTech / Banking | JPMC, Goldman, Stripe         | Wire transfers, loan approvals                          | Compliance & fraud — EU AI Act Article 15                          |
-| Health systems | UnitedHealth, Humana             | Summarising charts, explaining benefits                  | HIPAA — preventing hallucinated medical advice and PII leaks       |
-| B2B SaaS titans| Salesforce, ServiceNow            | Internal agent fleets, support, DevOps                  | Cost & security — recursive loops and indirect injection           |
-
-### 14.2 Design-partner program
-
-We do not sell to the first 10 — we co-build. Free six-month license traded for deep technical feedback and a reference logo.
-
-- **Entry hook.** A free *shadow-agent audit*: the discovery module surfaces every unauthorised agent currently talking to the company's data.
-- **Zero-key trial.** Deploy the proxy as a sidecar for one high-risk team (typically support automation). Show key injection from Vault — devs no longer touch raw credentials.
-- **Compliance whitepaper.** Map Warden logs directly to EU AI Act reporting requirements with the customer's legal team.
-
-### 14.3 Land and expand
-
-1. **Tactical wedge.** Single high-risk workflow → Warden as gateway.
-2. **CFO play.** 30-day report: recursive loops killed, dollars saved by routing simple tasks to Llama-3.
-3. **Enterprise standard.** Once Warden saves money *and* secures data, it becomes mandatory for every internal AI project.
-
-### 14.4 2026 entry points
-
-- **Sovereignty pivot (EU).** Position Warden as the sovereign cloud shield — the only way to prevent US LLMs (OpenAI, Anthropic) from ingesting sensitive EU data.
-- **MCP on-ramp.** Target companies already on MCP: "You have the protocol; you do not have the firewall. We are the first MCP-native security gateway."
-
-### 14.5 Success metrics — the first 10
-
-- Deployment time **< 4 hours** (must be frictionless)
-- Latency overhead **< 15 ms** (must be invisible)
-- Violation catch rate **> 99%** on simulated indirect-injection tests
-- NPS **> 70** from both CISO and lead developer
-
-> *We are not another security tool. We are the insurance policy that lets you ship your most ambitious AI projects without betting the company's reputation on a probabilistic model.*
-
----
-
 ## 15. Pricing & revenue model
 
 Pricing is a **discrete SKU ladder anchored on the active agent**, not a flat-fee floor with a per-token tax bolted on. The active agent (a registered SVID with an envelope in WAO that has executed at least one tool call in the last 30 days) is the unit of risk *and* the unit of value, so it is also the unit of meter. Token volume rides inside the seat as a fair-use cap; only overage is metered. One dominant axis = one negotiation, not two.
@@ -742,85 +696,6 @@ Warden ships a **shadow attacker** module. Once a week it spawns a malicious age
 
 ---
 
-## 17. 24-month roadmap to acquisition
-
-Goal: a $500M+ acquisition by a tier-one cloud or security incumbent (Google, Palo Alto Networks, CrowdStrike) within 24 months.
-
-### Months 1–6: the standard-bearer era
-Establish MCP as the security battleground.
-
-- **Open-source Warden Lite.** Lightweight Rust MCP proxy; free for local agents. Capture bottom-up mindshare.
-- **Shadow-agent audit tool.** Free scanner that detects unsecured agentic activity in corporate Slack, GitHub, Jira. The CISO lead magnet.
-- **Strategic hires.** Lead engineers from the 2025/2026 NIST AI Agent Standards and OWASP Top 10 for Agentic Applications.
-
-### Months 7–12: the compliance lock-in
-Become the mandatory bridge for EU AI Act and NIST.
-
-- **Article 14/15 automation** — turn legal fear into one-click compliance.
-- **Design-partner cohort** — first 10 Fortune 500 customers (FinTech, health, gov).
-- **Identity federation** — partner with Okta / CyberArk so Warden becomes the enforcement engine for their identity layer.
-
-### Months 13–18: the FinOps & routing explosion
-Prove that security saves money.
-
-- **Semantic routing engine** — auto-route simple tasks to local Llama 3/4, complex to frontier.
-- **ROI dashboard** — "you saved $1M in API costs by using Warden." Flips the budget from security (grudge) to operations (growth).
-- **Stateful agent observability** — black-box recorder that lets legal "rewind" an agent's reasoning to find injection points.
-
-### Months 19–24: the exit auction
-Engineer a bidding war between cloud giants and cyber titans.
-
-- **Enterprise ubiquity** — 50+ logos at 140% NRR.
-- **Marketplace integration** — one-click in AWS Marketplace and Google Cloud AI Hub.
-- **Acquisition pitches.**
-  - *To Google / Microsoft:* "You provide the LLM (the car); we provide the brakes and steering. Without us, enterprises are too afraid to drive."
-  - *To Palo Alto / CrowdStrike:* "You secured the endpoint and the cloud; we secure the agentic actor. This is the next $10B category in cyber."
-
-### Valuation roadmap (2026–2028)
-
-| Milestone        | Metric                                           | Targeted valuation       |
-|------------------|--------------------------------------------------|--------------------------|
-| End of year 1    | $2M ARR, 500K open-source users                  | $40M (Series A)         |
-| Mid year 2       | $15M ARR, 10 Fortune-500 partners                | $250M (Series B)        |
-| End of year 2    | $40M ARR, high NRR, compliance moat              | $750M – $1.2B (exit)    |
-
-> **The trigger.** By late 2026, a major agentic data breach (an autonomous bot leaking an entire company's payroll, say) will occur. The vendor with forensic reasoning logs and a deterministic kill switch will be the only one the board trusts. Warden is that vendor.
-
----
-
-## 18. M&A targets & exit strategy
-
-The 2026 M&A landscape is characterised by **platformisation** — buyers are exhausted by vendor sprawl and demand native, agent-aware governance from their primary security providers.
-
-### 18.1 Super-platform contenders
-
-- **Palo Alto Networks.** July 2025 acquired CyberArk and Protect AI; CEO Nikesh Arora's 2026 vision is *Prisma AIRS*, a unified agent-runtime platform. **Fit:** Warden's Rust ingress proxy and OPA engine are the missing deterministic-enforcement layer.
-- **CrowdStrike.** January 2026 acquisition of SGNL — moving into continuous identity. **Fit:** CrowdStrike secures the endpoint; Warden secures semantic intent. Integration kills processes for *persona conflict* rather than malware.
-- **Google Cloud / Wiz.** Following the $32B Wiz acquisition, Google is integrating security directly into Gemini Enterprise. **Fit:** Google wants to be the safe cloud. Warden's MCP-native architecture lets it secure agents that talk to *other* clouds (AWS / Azure) — the universal governance layer.
-
-### 18.2 Cloud-native disruptors
-
-- **Zscaler.** January 2026 unveiled AI-specific edge innovations; sees the browser as the OS for agents. **Fit:** Zscaler lacks deep semantic inspection — Warden's Haiku-powered Layer 2 supplies it.
-- **Cloudflare.** Edge-compute leader, wants to be where the AI thinks. **Fit:** Warden's Wasm sidecar deploys natively to Cloudflare Workers — every edge node becomes a Warden-protected zone.
-
-### 18.3 Enterprise operating systems
-
-- **ServiceNow.** Acquired Armis; running massive Agentforce fleets that are huge liability risks. **Fit:** Warden's HIL orchestrator is the *gavel of control* their enterprise customers demand.
-- **Databricks.** Launched Lakewatch (agentic SIEM); acquired Antimatter for AI authorization. **Fit:** Warden's forensic ledger is the regulatory layer Databricks needs to prove how data was used by agents.
-
-### 18.4 Exit matrix — 2026 prediction
-
-| Buyer                | Acquisition logic                          | Estimated price          |
-|----------------------|--------------------------------------------|---------------------------|
-| Palo Alto Networks   | Standardise the agentic SOC                | $650M – $900M            |
-| CrowdStrike          | Real-time intent-aware identity            | $500M – $750M            |
-| Google Cloud         | Multi-cloud agent governance               | $1B+ (strategic premium) |
-| Zscaler              | Edge-based semantic security               | $450M – $600M            |
-
-> **The strategic squeeze.** End-of-2026 EU AI Act enforcement will create a compliance cliff. Incumbents without an Article-14 (human-oversight) solution face massive disadvantage. Warden, sitting at the intersection of Rust-level performance and Claude-level reasoning, is the universal adapter that lets any of these giants satisfy regulators instantly.
-
----
-
 ## 19. Risk management & operational resilience
 
 Risk management has graduated from passive checkboxes to active engineering. As agentic density rises, the primary failure mode is no longer a system being "down" but **degraded or rogue while remaining up**.
@@ -925,59 +800,17 @@ The forensic ledger is already legally admissible. The next leap is to make it *
 
 ---
 
-## 21. Conclusion: the trust dividend
-
-2026 marks the end of the experimentation phase. We have entered the **production era**, where the AI success metric is no longer just intelligence but **agency** — the ability to act, decide, persist. With agentic traffic growing at over 7,800% year-over-year, leaders have realised existing security models are fundamentally broken.
-
-### Strategic summary
-
-The problem space is not a collection of bugs — it is a structural gap in how we trust software:
-
-- Passive security is dead. You cannot secure something that thinks and acts in milliseconds with a manual review process.
-- Identity is only the start. Knowing *who* the agent is is useless if the agent is being persuaded to do something malicious.
-- **Intent is the new perimeter.** The only way to secure the agentic future is to govern semantic intent at the network edge.
-
-### Warden's value proposition
-
-Three things an enterprise needs to move from pilot to profit:
-
-1. **Deterministic control** — OPA policies ensure the AI never has the last word on high-risk actions.
-2. **Economic resilience** — FinOps and dynamic routing turn a token-burning experiment into a cost-optimised asset.
-3. **Regulatory immunity** — a forensic audit trail that turns the EU AI Act from a €15M fine threat into a competitive advantage.
-
-### The 2028 horizon — beyond the firewall
-
-Warden evolves from security gateway into the **universal AI operating system**:
-
-- **Agent-to-agent economies.** Warden becomes the clearinghouse where autonomous bots from different companies negotiate, sign contracts, exchange value.
-- **Sovereign gateway.** For nations and global enterprises, Warden becomes the *digital border* — no autonomous reasoning crosses a boundary without inspection for sovereignty and national security.
-
-> **The trust dividend.** A company that does not trust its agents limits them to chatbots. A company that uses Warden unleashes them to run supply chains, execute trades, and serve customers at machine speed. The dividend is not avoiding a breach — it is being first to capture the $450B of economic value autonomous agents will create by 2028.
-
----
-
 ## 22. Implementation status
 
-This document is the strategic plan. The actual implementation lives in sibling repos under `/Users/pmarat/claude/repos/`. The full build plan, the GTM surface, the identity service, and Warden Agent Onboarding are all shipped. Re-verify with `git log` per repo before relying on any specific claim.
+This document is the narrative. The shipped runtime lives in sibling repos.
 
-| Layer | Repo                    | Port  | Role                                                                  |
-|-------|--------------------------|-------|------------------------------------------------------------------------|
-| 1     | `warden-proxy`           | 8443  | mTLS ingress, Vault credential injection, security-first pipeline      |
-| 2     | `warden-brain`           | 8081  | Three-signal eval (intent, persona drift, indirect injection)          |
-| 3     | `warden-policy-engine`   | 8082  | Pure-Rust Rego (regorus); pluggable velocity tracker (in-proc / NATS-KV) |
-| 4     | `warden-ledger`          | 8083  | SHA-256 hash-chained, SQLite-backed, NATS subscriber, `/verify` API     |
-| —     | `warden-hil`            | 8084  | Pending → Approved/Denied/Expired state machine for yellow tier; WebAuthn approver auth |
-| —     | `warden-identity`       | 8086  | SPIFFE SVID issuance, OIDC delegation grants, action signing, A2A actor tokens, cross-tenant federation, agent registry + lifecycle (`/agents`) gating `/svid` + `/grant` |
+| Layer | Repo                   | Port  | Role                                                                                                                          |
+|-------|------------------------|-------|-------------------------------------------------------------------------------------------------------------------------------|
+| 1     | `warden-proxy`         | 8443  | mTLS ingress, Vault credential injection, security-first pipeline                                                             |
+| 2     | `warden-brain`         | 8081  | Three-signal semantic eval (intent classifier, persona drift, indirect injection)                                             |
+| 3     | `warden-policy-engine` | 8082  | Pure-Rust Rego (`regorus`); pluggable velocity tracker (in-process / NATS-KV)                                                 |
+| 4     | `warden-ledger`        | 8083  | SHA-256 hash-chained, SQLite-backed forensic store; NATS subscriber; `/verify` API; regulatory export                          |
+| —     | `warden-hil`           | 8084  | Pending → Approved / Denied / Expired state machine for Yellow-tier requests; WebAuthn approver auth                            |
+| —     | `warden-identity`      | 8086  | SPIFFE SVID issuance, OIDC delegation grants, action signing, A2A actor tokens, cross-tenant federation, agent registry + lifecycle |
 
-Test & GTM repos: `warden-e2e` (full-stack runner — `run.sh`, `run-stack-smoke.sh`, `run-federation.sh`, `run-onboarding.sh`), `warden-chaos-monkey` (red-team CLI), `warden-shadow-scanner`, `warden-lite`, `warden-sdk`, `warden-sandbox`, `warden-console`, `warden-ctl` (operator CLI), `warden-website`.
-
-Notable deviations from the original spec:
-
-- **Security-first, not race-to-veto.** The proxy awaits the security verdict before forking upstream. The original `tokio::select!` race architecture left a side-effect window for yellow-tier actions (a wire transfer fired before HIL approval). The race architecture remains in earlier git history if it is ever needed back.
-- **Brain runs raw HTTP with prompt caching wired** — there is no Rust Anthropic SDK, so the "anthropic-sdk migration" item resolved as raw-HTTP plus caching.
-- **Brain and policy run serially today** despite the fork module name. Parallelising is gated on Brain becoming side-effect-free (Voyage embeddings + indirect-injection Haiku call live there).
-- **Velocity tracker has two backends** — in-process `HashMap` (default) and NATS-KV (JetStream KV bucket, JSON-encoded ms timestamps, CAS update loop). Selected via `WARDEN_VELOCITY_BACKEND={in-process|nats-kv}`.
-
-**Hardening pass — shipped:** HIL modify-and-resume; explicit chain-version negotiation (`CURRENT_CHAIN_VERSION = 3` with v1/v2/v3 dispatch); opt-in post-export SQLite vacuum with append-only `chain_vacuum_cursor`; native `aws-sdk-s3` sink + real Apache Iceberg v2 metadata on every ledger export; pure-Rust sandbox simulator wired through proxy → HIL → console; WebAuthn approver auth (HIL backend + console proxy + e2e bootstrap); `warden-ledger` `/stream/audit` SSE endpoint and nullable `signal` annotation column; the identity service end-to-end — including attestation enforcement (rego `attestation_required` + per-tool `attestation_allowlist.json` + `AttestationClaims` on `PolicyInput` + per-spiffe-id verifier cache + `X-Warden-Attestation` per-request override + chaos-monkey `unattested_binary`); Warden Agent Onboarding (agent registry + lifecycle in `warden-identity`, chain v3 anchoring with outbox durability, `/svid` + `/grant` gating, `enforce` mode is now the default, `wardenctl agents migrate` for legacy fleets, `run-onboarding.sh` e2e); console `/agents`, `/agents/new`, `/agents/{id}` lifecycle UI; `/config` diagnostic page; observability surface — Prometheus `/metrics` per service, OTEL trace export across all six services with distinguishing `service.name` resource attributes, `WARDEN_LOG_FORMAT={pretty|json}` structured logging, `correlation_id` span propagation through every request handler, and the on-call runbook set; supply-chain & threat-model surface — uniform `deny.toml` and `cargo-deny check all` (advisories + licenses + bans + sources) gating every PR across the 14 Rust repos, `cargo-cyclonedx` SBOM generation + 90-day artifact retention on the same `supply-chain` job, `SECURITY.md` disclosure policy at every repo root (17 repos), RFC 9116 `security.txt` at `warden-website/.well-known/`, and the public threat model in `TECH_SPEC.md#threat-model` — STRIDE-organized layer by layer with explicit non-goals.
-
-**Hardening pass — fully shipped.** Human Auth Surface, Identity Attestation, Operability, Observability, Supply Chain & Threat Model, and Regulatory Export are all closed. Substantive design records live as top-level sections in `TECH_SPEC.md` (Operator authentication; Regulatory export). Service-mesh / s2s mTLS work is deferred — see `TECH_SPEC.md#threat-model` "Open items".
+For per-feature claims with copy-paste verification commands and expected output, see [`./FEATURES.md`](./FEATURES.md). For design records, the threat model, and on-call runbooks, see [`./TECH_SPEC.md`](./TECH_SPEC.md).
