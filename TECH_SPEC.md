@@ -1485,7 +1485,7 @@ The four operational tradeoffs that gate the green light, all confirmed:
 
 Companion to [Console config page](#console-config-page) (read-only diagnostic) and the policy-engine description in `README.md` §11.2 ("Layer 3 — The Law"). Where the config page exposes deployment metadata and four-backend health probes, this section adds a *write* surface: viewing, editing, activating, deactivating, and deleting the `*.rego` and `*.json` files that `warden-policy-engine` loads.
 
-**Module status:** designed; not yet shipped. Touches `warden-policy-engine` (new SQLite-backed policy store, write API, atomic engine rebuild, outbox to NATS), `warden-console` (new `/policies` surface, new `Role::Admin`), `warden-sdk` (typed client for the new endpoints), and `warden-ledger` (consumes new `policy.*` chain v3 event kinds — no schema bump, chain v3 is event-kind-polymorphic).
+**Module status:** **shipped.** Lives in `warden-policy-engine` (SQLite-backed policy store, write API, atomic engine rebuild, NATS-published outbox), `warden-console` (`/policies` surface + `Role::Admin`), `warden-sdk` (`PoliciesClient`), and `warden-ledger` (consumes new `policy.*` chain v3 event kinds — no schema bump, chain v3 is event-kind-polymorphic). End-to-end coverage in `warden-e2e/run-policies.sh`.
 
 Design decided by a `/grill-me` walkthrough. Eight architectural decisions resolved in sequence. This doc is the consolidated record so the implementation work can begin from a stable baseline.
 
