@@ -1304,7 +1304,7 @@ The demo is *not* a sales-replacement and *not* a free trial. It's a self-serve 
 
 #### 3.1 Guided tour
 
-Three-scenario tour on `wardenlabs.com/demo`:
+Three-scenario tour on `vanteguardlabs.com/demo`:
 
 | Order | Scenario | Length (auto-play) | Layer focus |
 |---|---|---|---|
@@ -1320,7 +1320,7 @@ The tour is **fully client-side** (animations + pre-canned responses). No backen
 
 #### 3.2 Console handoff
 
-CTA at end of tour: "Open this in the real console." Click → Cloudflare Worker mints a 30-min HS256 JWT with a unique `correlation_prefix` and `agent_id` claim → handoff URL `https://demo.wardenlabs.com/audit#token=…&prefix=demo-7f3a-`.
+CTA at end of tour: "Open this in the real console." Click → Cloudflare Worker mints a 30-min HS256 JWT with a unique `correlation_prefix` and `agent_id` claim → handoff URL `https://demo.vanteguardlabs.com/audit#token=…&prefix=demo-7f3a-`.
 
 Console reads the URL fragment on first hit, swaps it for an HTTP-only `SameSite=Strict` cookie, redirects to the clean URL. Standard fragment-auth pattern; the token never appears in server logs.
 
@@ -1340,12 +1340,12 @@ HIL approve/deny works on the visitor's own pendings (per-prefix filter enforces
 ```
 Cloudflare (CDN + WAF + Workers + Turnstile)
     │
-    ├──► wardenlabs.com           — CF Pages (3 static files, tour animation)
+    ├──► vanteguardlabs.com           — CF Pages (3 static files, tour animation)
     │
-    ├──► api.wardenlabs.com       — CF Worker (Turnstile validation + JWT mint)
+    ├──► api.vanteguardlabs.com       — CF Worker (Turnstile validation + JWT mint)
     │       only. mint endpoint never reaches origin.
     │
-    └──► demo.wardenlabs.com      — Hetzner-class VPS, single region
+    └──► demo.vanteguardlabs.com      — Hetzner-class VPS, single region
             └── docker-compose --profile stack up -d
                 ├── nats, vault, bootstrap
                 ├── ledger, policy-engine, brain, hil, identity, proxy, console
@@ -1441,7 +1441,7 @@ No status page (broadcasts outages to competitors / journalists; CISOs don't sub
 | 1 | Tour animation (3 scenarios, auto-play + click-through) + polished marketing page + Plausible events wired | Visual story works; copy lands; conversion measurable |
 | 2 | Receipts-page handoff (live chain rows fetched by sentinel correlation-id, `curl /verify` snippet) | Cryptographic-realness flex without backend complexity |
 | **DECISION POINT — measure handoff click-through against thresholds in §2** |
-| 3 | VPS + compose deployed at `demo.wardenlabs.com`; existing console behind hardcoded basic-auth (gate against forgotten lockdown); CF DNS+WAF+rate-limits | Real console URL works; ops baseline |
+| 3 | VPS + compose deployed at `demo.vanteguardlabs.com`; existing console behind hardcoded basic-auth (gate against forgotten lockdown); CF DNS+WAF+rate-limits | Real console URL works; ops baseline |
 | 4 | CF Worker token mint + Turnstile gate; console demo-mode (URL-fragment → cookie); HIL approve-only filter enforcement | Per-session isolation; defense-in-depth |
 | 5 | Ledger filter enforcement; `warden-chaos-catalog` extraction (chaos-monkey becomes thin wrapper); `/demo/fire` curated attack menu | Full kick-the-tires console |
 | 6 | Auto-decide skip-prefix flag in simulator; UptimeRobot; weekly R2 backups; reset-cadence policy in `README.md`; reset-week test | Production-grade ops |
@@ -1466,7 +1466,7 @@ These emerge during the build, not at design time:
 - Animation copy and narrative beats per scenario.
 - Token-expiry-mid-session UX (probably: 401 → modal → re-Turnstile → fresh token → retry last action).
 - CSS / brand polish on the demo console vs. operator console default.
-- Domain choice (assumes `wardenlabs.com`).
+- ~~Domain choice~~ — resolved 2026-05-08: `vanteguardlabs.com` (with `demo.` and `api.` subdomains as in §4).
 - Where exactly the `warden-chaos-catalog` crate lives (new repo vs. submodule of warden-chaos-monkey).
 
 ### 10. Confirmed before writing code

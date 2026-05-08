@@ -1350,7 +1350,7 @@ These are **explicit open items**, tracked here for completeness against the Imp
 
 ### 14.3 Demo experience (entire spec section)
 
-**Concept.** `TECH_SPEC.md#demo-experience` describes a 6-week build plan: guided tour at `wardenlabs.com/demo`, Cloudflare Worker token mint, `warden-console` "demo-mode" with URL-fragment → cookie auth, token-scoped read filters in ledger and HIL, `warden-chaos-catalog` library extracted from `warden-chaos-monkey`, `/demo/fire` page, `demo.session_minted` event_kind, simulator `--auto-decide-skip-prefix`.
+**Concept.** `TECH_SPEC.md#demo-experience` describes a 6-week build plan: guided tour at `vanteguardlabs.com/demo`, Cloudflare Worker token mint, `warden-console` "demo-mode" with URL-fragment → cookie auth, token-scoped read filters in ledger and HIL, `warden-chaos-catalog` library extracted from `warden-chaos-monkey`, `/demo/fire` page, `demo.session_minted` event_kind, simulator `--auto-decide-skip-prefix`.
 
 **Status.** Marketing-site mock exists (`warden-website/` 3-file static page); no backend integration. Module status line in the spec accurately says: "new, marketing/funnel work."
 
