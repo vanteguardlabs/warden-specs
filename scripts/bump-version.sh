@@ -30,14 +30,14 @@ case "$MODE" in
 esac
 new="${major}.${minor}.${patch}"
 
-# In-place writes preserve the inode → Caddy bind-mount sees the new
-# content without a container restart. `> file` truncates + writes to
-# the existing inode. `sed -i` would replace the inode and break the
-# bind-mount.
+# VERSION is the source of truth for "what version we're on". The
+# served version per env lives in warden-e2e/<env>/version.json
+# and is updated by that env's deploy.sh on a successful
+# `compose up -d`. Bumping here doesn't change what visitors see
+# until you actually deploy.
 printf '%s\n' "$new" > VERSION
-printf '{"version":"%s"}\n' "$new" > version.json
 
-git add VERSION version.json
+git add VERSION
 git -c user.name=VanteguardLabs -c user.email=vanteguardlabs@gmail.com \
     commit -m "bump to ${new}"
 git push origin main
