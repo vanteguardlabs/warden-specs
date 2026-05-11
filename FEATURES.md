@@ -17,8 +17,8 @@ docker run -d --name warden-vault -p 8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID=root h
 ./repos/warden-proxy/scripts/gen_certs.sh
 
 # Two boot paths (pick by what you're testing):
-./repos/warden-e2e/run.sh                                                   # host-cargo, full assertions
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d # console-with-data demo
+./repos/warden-e2e/dev/run.sh                                               # host-cargo, full assertions (dev env)
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack up -d # console-with-data demo
 ```
 
 The host-cargo runner (`run.sh`) builds in **debug profile on purpose** — Apple clang has been observed to segfault when building `ring`'s release-profile C code on some macOS versions.
@@ -59,7 +59,7 @@ The host-cargo runner (`run.sh`) builds in **debug profile on purpose** — Appl
 curl -v https://localhost:8443/mcp     # ssl handshake failure
 
 # With the e2e suite's bundled cert, the request reaches handle_mcp
-./repos/warden-e2e/run.sh              # tail logs for "mtls accept"
+./repos/warden-e2e/dev/run.sh              # tail logs for "mtls accept"
 ```
 
 Console `/audit` shows the resolved agent identity on every row, under the column labeled **`agent`** — that's the CN/SPIFFE identity threaded through (for SPIFFE-bearing certs the column renders just the `<name>` segment of `spiffe://.../agent/<name>/...`, not the full URI).
@@ -159,7 +159,7 @@ Console `/audit` is the human-readable view; `wardenctl regulatory export` produ
 **Verify.** Mixed v1/v2/v3 export verification:
 
 ```bash
-./repos/warden-e2e/run.sh        # produces a chain with all three versions
+./repos/warden-e2e/dev/run.sh        # produces a chain with all three versions
 curl -s http://localhost:8083/verify | jq .valid    # true
 ```
 
@@ -204,7 +204,7 @@ Write requests carry `{reason: string, expected_current_version: int}` (required
 **Verify.**
 
 ```bash
-./repos/warden-e2e/run-policies.sh
+./repos/warden-e2e/dev/run-policies.sh
 # Boots policy-engine + ledger + NATS, drives the full mutation surface
 # end-to-end, asserts every mutation lands as a policy.* chain v3 row
 # and the chain still verifies after each.
@@ -238,7 +238,7 @@ curl http://localhost:8083/agents | jq .agents
 
 ```bash
 # Boot stack
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack up -d
 # Open the simulator's run flag
 curl -X POST http://localhost:9100/running -d '{"running":true}'
 # Approve the queued wire_transfer in the console
@@ -286,7 +286,7 @@ curl "http://localhost:8083/audit/correlation/<correlation_id>" | jq
 
 ```bash
 # The e2e runner's onboarding flow exercises this end-to-end
-./repos/warden-e2e/run-onboarding.sh
+./repos/warden-e2e/dev/run-onboarding.sh
 ```
 
 Console `/agents/{id}` lifecycle timeline shows the registration row that gates issuance.
@@ -346,7 +346,7 @@ cat manifest.sig    # 128 hex chars + LF
 **Verify.**
 
 ```bash
-./repos/warden-e2e/run-federation.sh
+./repos/warden-e2e/dev/run-federation.sh
 # Boots two warden-identity instances with different trust domains and asserts:
 # 1. Fresh peer bundle → A2A succeeds
 # 2. Bundle staled out → peer_bundle_stale rejection
@@ -612,7 +612,7 @@ open http://localhost:8085/policies
 # Edit a rego file, save with reason — chain v3 row lands in /audit
 ```
 
-End-to-end coverage in `./repos/warden-e2e/run-policies.sh` (see §11.7).
+End-to-end coverage in `./repos/warden-e2e/dev/run-policies.sh` (see §11.7).
 
 ---
 
@@ -668,7 +668,7 @@ WARDEN_CONSOLE_AUTH=disabled cargo run -p warden-console -- --bind 0.0.0.0
 
 ```bash
 # Boot stack with Keycloak fixture (warden-e2e ships one)
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack-oidc up -d
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack-oidc up -d
 open http://localhost:8085/login
 # Redirects to Keycloak, returns with session
 ```
@@ -1074,37 +1074,37 @@ cargo run -p warden-sandbox-cli -- --method tools/call --params '{"name":"shell"
 
 ## 11. Test infrastructure
 
-### 11.1 `warden-e2e/run.sh`
+### 11.1 `warden-e2e/dev/run.sh`
 
 **Concept.** The host-cargo runner. Boots all six services + Docker NATS/Vault + a stub upstream; runs the happy path; runs the chaos-monkey red-team suite; tears down. Source of truth for "does the stack work end-to-end." Builds in **debug profile on purpose** — Apple clang segfaults on `ring`'s release C build on some macOS versions.
 
-**Implementation.** Bash script at `repos/warden-e2e/run.sh`. Env knobs: `E2E_SKIP_CHAOS=1` for fast happy-path runs, `E2E_KEEP_LOGS=1` to retain logs and the temp work dir.
+**Implementation.** Bash script at `repos/warden-e2e/dev/run.sh`. Env knobs: `E2E_SKIP_CHAOS=1` for fast happy-path runs, `E2E_KEEP_LOGS=1` to retain logs and the temp work dir.
 
 **Verify.**
 
 ```bash
-./repos/warden-e2e/run.sh                         # full
-E2E_SKIP_CHAOS=1 ./repos/warden-e2e/run.sh        # fast
-E2E_KEEP_LOGS=1 ./repos/warden-e2e/run.sh         # debug
+./repos/warden-e2e/dev/run.sh                         # full
+E2E_SKIP_CHAOS=1 ./repos/warden-e2e/dev/run.sh        # fast
+E2E_KEEP_LOGS=1 ./repos/warden-e2e/dev/run.sh         # debug
 ```
 
-### 11.2 `warden-e2e/run-federation.sh`
+### 11.2 `warden-e2e/dev/run-federation.sh`
 
 **Concept.** Two-tenant federation runner. Boots two `warden-identity` instances under different trust domains and asserts the SPIFFE federation freshness gate: fresh peer bundle → A2A succeeds; staled-out → `peer_bundle_stale`.
 
-**Implementation.** `repos/warden-e2e/run-federation.sh`. Configures `WARDEN_FEDERATION_PEERS` on each instance pointing at the other's `/.well-known/spiffe-bundle`. Triggers a peer-bundle staleness by stopping one instance's bundle endpoint, waiting past the freshness window, attempting A2A.
+**Implementation.** `repos/warden-e2e/dev/run-federation.sh`. Configures `WARDEN_FEDERATION_PEERS` on each instance pointing at the other's `/.well-known/spiffe-bundle`. Triggers a peer-bundle staleness by stopping one instance's bundle endpoint, waiting past the freshness window, attempting A2A.
 
 **Verify.**
 
 ```bash
-./repos/warden-e2e/run-federation.sh
+./repos/warden-e2e/dev/run-federation.sh
 ```
 
-### 11.3 `warden-e2e/run-onboarding.sh`
+### 11.3 `warden-e2e/dev/run-onboarding.sh`
 
 **Concept.** WAO § 13.1 runner. Boots a `dexidp/dex` mock IdP container, drives `wardenctl agents create / suspend / decommission / migrate`, asserts `/svid` + `/grant` gating in `warn` and `enforce` modes (including § 13.1.7 bulk-enrollment migration replay).
 
-**Implementation.** `repos/warden-e2e/run-onboarding.sh`. Dex mock configured with two static users:
+**Implementation.** `repos/warden-e2e/dev/run-onboarding.sh`. Dex mock configured with two static users:
 
 - `admin@acme.com` with `groups: [warden-platform-admins]` (mapped to `agents:create + agents:admin`)
 - `dev@acme.com` with `groups: [payments]` (no Warden capabilities — tests `403 missing_capability:agents:create`)
@@ -1112,22 +1112,22 @@ E2E_KEEP_LOGS=1 ./repos/warden-e2e/run.sh         # debug
 **Verify.**
 
 ```bash
-./repos/warden-e2e/run-onboarding.sh
+./repos/warden-e2e/dev/run-onboarding.sh
 ```
 
 ### 11.4 Compose stack (`--profile stack`)
 
 **Concept.** The console-with-data demo. Boots everything in containers + the simulator + upstream-stub; surfaces a populated console for screenshots, evaluator walkthroughs, and operator practice. Identity boots in `enforce` registration mode end-to-end so the demo matches the production default.
 
-**Implementation.** `repos/warden-e2e/docker-compose.yml --profile stack`. First cold build is ~15 min (release profile, no shared cargo target across the six service Dockerfiles). Subsequent runs are image-cached. `run-stack-smoke.sh` is the lighter health check; `run-stack-e2e.sh` is the full assertion suite (see §11.8).
+**Implementation.** `repos/warden-e2e/prod/docker-compose.yml --profile stack`. First cold build is ~15 min (release profile, no shared cargo target across the six service Dockerfiles). Subsequent runs are image-cached. `run-stack-smoke.sh` is the lighter health check; `run-stack-e2e.sh` is the full assertion suite (see §11.8).
 
 **Verify.**
 
 ```bash
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack up -d
 open http://localhost:8085
-./repos/warden-e2e/run-stack-smoke.sh
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack down -v
+./repos/warden-e2e/prod/run-stack-smoke.sh
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack down -v
 ```
 
 ### 11.5 `warden-chaos-monkey`
@@ -1162,35 +1162,35 @@ The `warden-upstream-stub` sub-binary is what compose uses as the proxy's downst
 **Verify.**
 
 ```bash
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack up -d
 curl -X POST http://localhost:9100/running -d '{"running":true}'
 open http://localhost:8085/audit
 # Sim traffic streams in
 ```
 
-### 11.7 `warden-e2e/run-policies.sh`
+### 11.7 `warden-e2e/dev/run-policies.sh`
 
 **Concept.** Console policy management e2e. Boots a minimal stack (`warden-policy-engine` + `warden-ledger` + NATS — no proxy/brain/HIL/identity) and drives the full mutation surface end-to-end: list, create, update with optimistic concurrency, deactivate / activate, rollback, soft delete. After every mutation, asserts a matching `policy.*` row landed in the ledger via `warden.forensic` and the chain still verifies. Mirrors `run-onboarding.sh`'s shape: focused on the §1.9 / §4.10 wire contract, not the full MCP path.
 
-**Implementation.** `repos/warden-e2e/run-policies.sh`. Same prereqs as `run.sh` (cargo / curl / jq / NATS). Honors `E2E_KEEP_LOGS=1` and dumps tails on failure.
+**Implementation.** `repos/warden-e2e/dev/run-policies.sh`. Same prereqs as `run.sh` (cargo / curl / jq / NATS). Honors `E2E_KEEP_LOGS=1` and dumps tails on failure.
 
 **Verify.**
 
 ```bash
-./repos/warden-e2e/run-policies.sh
+./repos/warden-e2e/dev/run-policies.sh
 ```
 
-### 11.8 `warden-e2e/run-stack-e2e.sh`
+### 11.8 `warden-e2e/dev/run-stack-e2e.sh`
 
 **Concept.** Same assertion depth as `run.sh` (correlation_id join, chain `/verify`, HIL Yellow-tier roundtrip, chaos-monkey red-team suite) but against the docker-compose `--profile stack` containers instead of the host-cargo debug build. Use this when iterating on Dockerfile / compose changes — `run-stack-smoke.sh` only proves the demo is healthy; `run-stack-e2e.sh` proves the production-style image build still passes the full suite.
 
-**Implementation.** `repos/warden-e2e/run-stack-e2e.sh`. Does **not** boot any service — expects the compose stack already running. PIDs / boot harness from `run.sh` are absent. `E2E_SKIP_CHAOS=1` skips the red-team tail.
+**Implementation.** `repos/warden-e2e/dev/run-stack-e2e.sh`. Does **not** boot any service — expects the compose stack already running. PIDs / boot harness from `run.sh` are absent. `E2E_SKIP_CHAOS=1` skips the red-team tail.
 
 **Verify.**
 
 ```bash
-docker compose -f repos/warden-e2e/docker-compose.yml --profile stack up -d
-./repos/warden-e2e/run-stack-e2e.sh
+docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack up -d
+./repos/warden-e2e/dev/run-stack-e2e.sh
 ```
 
 ---
@@ -1396,7 +1396,7 @@ Listed in the relevant section's "What this spec deliberately does not include":
 The single command that exercises ~80% of the features above:
 
 ```bash
-./repos/warden-e2e/run.sh
+./repos/warden-e2e/dev/run.sh
 ```
 
 Boots all six services, drives the happy path through every layer, runs the chaos-monkey catalog, asserts the chain verifies, exits 0 on success. Read the runner's stdout — every assertion that passes corresponds to a feature in this document.

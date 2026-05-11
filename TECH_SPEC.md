@@ -1320,7 +1320,7 @@ The tour is **fully client-side** (animations + pre-canned responses). No backen
 
 #### 3.2 Console handoff
 
-CTA at end of tour: "Open this in the real console." Click → Cloudflare Worker mints a 30-min HS256 JWT with a unique `correlation_prefix` and `agent_id` claim → handoff URL `https://demo.vanteguardlabs.com/audit#token=…&prefix=demo-7f3a-`.
+CTA at end of tour: "Open this in the real console." Click → Cloudflare Worker mints a 30-min HS256 JWT with a unique `correlation_prefix` and `agent_id` claim → handoff URL `https://console-demo.vanteguardlabs.com/audit#token=…&prefix=demo-7f3a-`.
 
 Console reads the URL fragment on first hit, swaps it for an HTTP-only `SameSite=Strict` cookie, redirects to the clean URL. Standard fragment-auth pattern; the token never appears in server logs.
 
@@ -1345,7 +1345,7 @@ Cloudflare (CDN + WAF + Workers + Turnstile)
     ├──► api.vanteguardlabs.com       — CF Worker (Turnstile validation + JWT mint)
     │       only. mint endpoint never reaches origin.
     │
-    └──► demo.vanteguardlabs.com      — Hetzner-class VPS, single region
+    └──► console-demo.vanteguardlabs.com — Hetzner-class VPS, single region
             └── docker-compose --profile stack up -d
                 ├── nats, vault, bootstrap
                 ├── ledger, policy-engine, brain, hil, identity, proxy, console
@@ -1441,7 +1441,7 @@ No status page (broadcasts outages to competitors / journalists; CISOs don't sub
 | 1 | Tour animation (3 scenarios, auto-play + click-through) + polished marketing page + Plausible events wired | Visual story works; copy lands; conversion measurable |
 | 2 | Receipts-page handoff (live chain rows fetched by sentinel correlation-id, `curl /verify` snippet) | Cryptographic-realness flex without backend complexity |
 | **DECISION POINT — measure handoff click-through against thresholds in §2** |
-| 3 | VPS + compose deployed at `demo.vanteguardlabs.com`; existing console behind hardcoded basic-auth (gate against forgotten lockdown); CF DNS+WAF+rate-limits | Real console URL works; ops baseline |
+| 3 | VPS + compose deployed at `console-demo.vanteguardlabs.com`; existing console behind hardcoded basic-auth (gate against forgotten lockdown); CF DNS+WAF+rate-limits | Real console URL works; ops baseline |
 | 4 | CF Worker token mint + Turnstile gate; console demo-mode (URL-fragment → cookie); HIL approve-only filter enforcement | Per-session isolation; defense-in-depth |
 | 5 | Ledger filter enforcement; `warden-chaos-catalog` extraction (chaos-monkey becomes thin wrapper); `/demo/fire` curated attack menu | Full kick-the-tires console |
 | 6 | Auto-decide skip-prefix flag in simulator; UptimeRobot; weekly R2 backups; reset-cadence policy in `README.md`; reset-week test | Production-grade ops |
@@ -1485,7 +1485,7 @@ The four operational tradeoffs that gate the green light, all confirmed:
 
 Companion to [Console config page](#console-config-page) (read-only diagnostic) and the policy-engine description in `README.md` §11.2 ("Layer 3 — The Law"). Where the config page exposes deployment metadata and four-backend health probes, this section adds a *write* surface: viewing, editing, activating, deactivating, and deleting the `*.rego` and `*.json` files that `warden-policy-engine` loads.
 
-**Module status:** **shipped.** Lives in `warden-policy-engine` (SQLite-backed policy store, write API, atomic engine rebuild, NATS-published outbox), `warden-console` (`/policies` surface + `Role::Admin`), `warden-sdk` (`PoliciesClient`), and `warden-ledger` (consumes new `policy.*` chain v3 event kinds — no schema bump, chain v3 is event-kind-polymorphic). End-to-end coverage in `warden-e2e/run-policies.sh`.
+**Module status:** **shipped.** Lives in `warden-policy-engine` (SQLite-backed policy store, write API, atomic engine rebuild, NATS-published outbox), `warden-console` (`/policies` surface + `Role::Admin`), `warden-sdk` (`PoliciesClient`), and `warden-ledger` (consumes new `policy.*` chain v3 event kinds — no schema bump, chain v3 is event-kind-polymorphic). End-to-end coverage in `warden-e2e/dev/run-policies.sh`.
 
 Design decided by a `/grill-me` walkthrough. Eight architectural decisions resolved in sequence. This doc is the consolidated record so the implementation work can begin from a stable baseline.
 
