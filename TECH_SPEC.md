@@ -167,6 +167,8 @@ The signing service returns `{ signature, key_id, signed_at }`. The proxy's NATS
 - Tampering with any historical row breaks the signature on every later row, not just the chain hash. Two-layer integrity.
 - A regulator reproducing the chain only needs Warden's JWKS + the ledger export — no live service.
 
+**Implementation note: proxy uses `GENESIS_PREV_HASH` (64 zeros) in the signed envelope, not the live ledger tail.** A naive implementation would have the proxy `GET /chain-tail` from `warden-ledger` before every `/sign` call — a second mandatory RTT on the hot path. Instead, the proxy signs against the all-zeros constant; the ledger then stamps the real `prev_hash` into the chain row on append. The two-layer integrity claim still holds because the chain-row hash (which uses the real `prev_hash`) is what auditors verify, not the per-action signature in isolation. Rationale lives in `warden-proxy/src/sign.rs` module-doc. This is the only signing-side wire deviation from the spec contract; integrators verifying signatures must use `GENESIS_PREV_HASH` for the signed-payload re-computation, then check chain continuity separately.
+
 #### 5.3 What is *not* signed
 
 `source` (client-controlled metadata, not in hashable) and any HIL approver identity that is not yet cryptographic. WebAuthn-backed approver signatures are the natural follow-on, but they sign a *separate* HIL state-transition event, not the proxy's verdict event.
@@ -482,7 +484,7 @@ The agent record is consulted in the same SQLite transaction as the issuance INS
 
 #### 6.3 Mode behaviour
 
-`WARDEN_IDENTITY_REGISTRATION_MODE = off | warn | enforce`. Default `warn` for one minor version after this spec lands, then default flips to `enforce`.
+`WARDEN_IDENTITY_REGISTRATION_MODE = off | warn | enforce`. Default `enforce` (post-rollout posture; `RegistrationMode::default()` in `warden-identity/src/lib.rs`). Operators staging a brownfield rollout set `WARDEN_IDENTITY_REGISTRATION_MODE=warn` to onboard agents without 403'ing unregistered names first.
 
 | Mode | Unregistered name on `/svid` | Unregistered name on `/grant` | Registered agent + out-of-envelope grant |
 |---|---|---|---|
@@ -1058,7 +1060,7 @@ auth:
     viewer_groups: ["engineering", "compliance"]
 ```
 
-No user table. No admin role (admin surface = `wardenctl` + direct identity API). No runtime role exceptions. The IdP is the source of truth.
+No user table. No runtime role exceptions. The IdP is the source of truth. (An `admin` tier is layered on top by [Console policy management](#console-policy-management) §8 for the `/policies` CRUD surface — `admin_groups` mirrors `approver_groups` / `viewer_groups`; resolution priority is `admin > approver > viewer`. The agent-registry write surface continues to require capabilities granted by `warden-identity`'s `[capabilities.tenants.<tid>]` map — not console role — so direct identity-API + `wardenctl` remain the canonical agent-admin path.)
 
 The viewer-route gates (`require_viewer` / `require_viewer_api`) sit in front of every console read route; no-session HTML page requests get a `303 → /login`, no-session SSE / JSON requests get `401`. `disabled` mode short-circuits both gates with a synthetic Approver session for dev / CI. The HIL-queue template carries a `can_approve` flag so OIDC viewers see the queue contents but no Approve / Deny / Modify buttons.
 
@@ -1082,6 +1084,17 @@ A Slack / Teams approve click looks up `user_id → oidc_sub` via this table. **
 
 Buyers create their own Slack / Teams app from a manifest published in `warden-console/docs/` (`slack-app-manifest.json` / `teams-app-manifest.md`) — no marketplace presence.
 
+**Wire surface** (HIL endpoints, called by the console):
+
+| Method | Path | Body / Effect |
+|---|---|---|
+| `POST` | `/identities/upsert` | `{oidc_sub, slack_user_id?, teams_user_id?}` — upsert one row keyed by `oidc_sub` |
+| `GET` | `/identities/{oidc_sub}` | Read one row by `oidc_sub` |
+| `DELETE` | `/identities/{oidc_sub}/slack` | Unlink Slack only; row remains for Teams + other future channels |
+| `DELETE` | `/identities/{oidc_sub}/teams` | Unlink Teams only |
+
+The console's `/me/identities` page is the only authorized caller in v1; HIL gates these on the shared `WARDEN_HIL_DECIDE_TOKEN` bearer.
+
 ### 5. Chain `decided_by` schema
 
 The literal `"warden-console"` value has been replaced — HIL now stamps `decided_by` server-side from the verified principal:
@@ -1103,7 +1116,7 @@ Existing WebAuthn rows in the chain don't get the field retroactively; only rows
 The trust path is **mode-dependent** because WebAuthn already has a stronger primitive and we don't tear it out:
 
 - **WebAuthn mode (today, unchanged):** HIL is the credential authority. The console proxies WebAuthn ceremonies and shuttles HIL's session cookie back to the browser; subsequent `/decide` calls attach the HIL cookie and HIL stamps `decided_by` from the verified principal.
-- **OIDC / basic-admin / disabled:** HIL has no credential to verify, so console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console verifies OIDC (or basic-admin), stamps `decided_by`, and presents the bearer on `/decide`. HIL trusts the request-body `decided_by` *only when* a valid bearer is present; without the bearer, the existing `Authn::Disabled` fallback applies. **Both processes refuse to boot if the configured mode requires the token and it is missing.**
+- **OIDC / basic-admin / disabled:** HIL has no credential to verify, so console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console verifies OIDC (or basic-admin), stamps `decided_by`, and presents the bearer on `/decide`. HIL trusts the request-body `decided_by` *only when* a valid bearer is present; without the bearer, the existing `Authn::Disabled` fallback applies. **Console refuses to boot if the configured mode requires the token and it is missing**; HIL validates per-request and 401s a token-less decide (boot-time validation on HIL is queued as v1.x+1 polish so a misconfigured deploy fails on first decide instead of on next process start).
 
 The bearer is the interim posture for the non-WebAuthn modes; internal s2s mTLS via warden-identity SVIDs (deferred service-mesh work, see "Threat model — Open items") will replace it uniformly across all modes including WebAuthn.
 
@@ -1251,18 +1264,18 @@ Lives under a new top-level `regulatory` verb (own surface — distinct from `ag
 - **Identity unreachable** → `503 signing_unavailable`. Fail-closed: the ledger never emits an unsigned bundle. Operator runbook is "Identity service unreachable" in the [Runbooks](#runbooks) section.
 - **Empty window** → `200 OK` with a valid bundle, `row_count: 0`.
 - **Body too large** → `413 payload_too_large`.
-- **Body content-type not `text/*`** → ignored as readme; the bundle is produced without `technical_documentation.md`.
+- **Body content-type not `text/*`** → `400 unsupported_media_type` with a diagnostic body. Surfacing a curl-without-content-type-header mistake loudly (vs. silently dropping the prose) caught operator-side configuration errors during slice-3 rollout; the loud-fail posture stuck. Operators who genuinely want a no-prose bundle pass an empty body or omit the body entirely.
 
 ---
 
 ## Demo experience
 
 
-Companion to none of the existing sections in form. Where [Console config page](#console-config-page) is one read-only page and [Agent onboarding](#agent-onboarding-wao) is a multi-service initiative with a chain version bump, this section sits between: a public demo surface that spans the marketing site, a Cloudflare Worker, the existing operator console, and three backend services, but introduces no new long-running service and no chain version change.
+Companion to none of the existing sections in form. Where [Console config page](#console-config-page) is one read-only page and [Agent onboarding](#agent-onboarding-wao) is a multi-service initiative with a chain version bump, this section sits between: a public demo surface that spans the marketing site, a token-mint service, the existing operator console, and the backend stack, but introduces no new long-running storage and no chain version change.
 
-**Module status:** new, marketing/funnel work. Extends `warden-website` (guided tour), `warden-console` (demo-mode), `warden-ledger` + `warden-hil` (token-scoped read filters and HIL approve enforcement), `warden-chaos-monkey` (extracted into a `warden-chaos-catalog` library + thin CLI wrapper). Adds one new artifact: a Cloudflare Worker for token mint. No new container in `docker-compose.yml`. No new chain version.
+**Module status:** **shipped.** Extends `warden-website` (guided tour + `/#contact` CTA), introduces `warden-demo-mint` (small Rust HS256-issuing service behind Cloudflare Turnstile, not a CF Worker — the original CF-Worker plan was dropped for parity with the rest of the in-stack Rust services and to keep the mint event auditable through the same NATS plumbing every other component uses), `warden-console` (demo-session cookie + curated `/demo` scenarios + `/demo/fire/{scenario}` endpoint), `warden-proxy` (correlation-ID splicing for the `X-Warden-Demo-Prefix` header), `warden-hil` + `warden-ledger` (token-prefix-scoped read filters and HIL decide enforcement), `warden-chaos-catalog` (pure-data attack catalog consumed by both `warden-chaos-monkey` CLI and console `/demo/fire`), `warden-simulator` (`--hil-skip-agent-id-prefix demo-` so visitors aren't auto-approved out from under themselves). Hosted at `warden.vanteguardlabs.com` (marketing) + `console-demo.vanteguardlabs.com` (operator surface).
 
-Design decided by a `/grill-me` walkthrough. Thirteen architectural decisions resolved in sequence; four confirmations on operational tradeoffs. This doc is the consolidated record so the implementation work can begin from a stable baseline.
+Design decided by a `/grill-me` walkthrough. Thirteen architectural decisions resolved in sequence; four confirmations on operational tradeoffs. This section is the consolidated record + a snapshot of how the build ultimately landed (one substrate substitution: in-stack Rust mint instead of CF Worker).
 
 ### 1. What this closes
 
@@ -1321,9 +1334,11 @@ The tour is **fully client-side** (animations + pre-canned responses). No backen
 
 #### 3.2 Console handoff
 
-CTA at end of tour: "Open this in the real console." Click → Cloudflare Worker mints a 30-min HS256 JWT with a unique `correlation_prefix` and `agent_id` claim → handoff URL `https://console-demo.vanteguardlabs.com/audit#token=…&prefix=demo-7f3a-`.
+CTA at end of tour: visitor passes Cloudflare Turnstile on `warden.vanteguardlabs.com/#contact` → POSTs to `warden-demo-mint` at `console-demo.vanteguardlabs.com/mint` → mint issues a 30-min HS256 JWT carrying `sub`, `correlation_prefix` (8 hex chars, `demo-` prefix), and `agent_id` (`demo-<hex>-bot`) → 303-redirects to `console-demo.vanteguardlabs.com/#token=<jwt>`.
 
-Console reads the URL fragment on first hit, swaps it for an HTTP-only `SameSite=Strict` cookie, redirects to the clean URL. Standard fragment-auth pattern; the token never appears in server logs.
+Browser JS shim (`warden-console/templates/base.html`) reads the URL fragment, POSTs to `/api/demo-session/exchange` → console sets HttpOnly `Secure SameSite=Lax` cookie, redirects to the clean URL. Standard fragment-auth pattern; the token never appears in server logs. (The `SameSite=Lax` choice over the originally-planned `Strict` is the only deviation from the design — the Strict variant blocked the post-mint navigation cross-site bounce.)
+
+The prefix is then spliced into the proxy's correlation IDs (`<prefix>-<rest of uuid>`) via the `X-Warden-Demo-Prefix` request header; ledger and HIL read endpoints filter on it; HIL `/decide` writes reject if the target pending's correlation ID doesn't carry the prefix.
 
 #### 3.3 In-console action surface
 
@@ -1334,84 +1349,84 @@ Visitor lands on `/audit`, scoped by token to:
 
 A new `/demo/fire` page renders the chaos-catalog scenarios as tiles. Click → demo console's backend handler validates the session token, calls `warden_chaos_catalog::fire(scenario_id, agent_id, correlation_prefix, proxy_url)`, redirects to `/audit?correlation_id=…&highlight=…` with the new rows scrolled into view.
 
-HIL approve/deny works on the visitor's own pendings (per-prefix filter enforces). Auto-decision sidecar configured to skip `demo-` prefixes so visitors aren't raced.
+HIL approve/deny works on the visitor's own pendings (per-prefix filter enforces). Simulator's auto-decide path skips agent IDs starting with `demo-` (via `--hil-skip-agent-id-prefix demo-` / `SIM_HIL_SKIP_AGENT_ID_PREFIX=demo-`) so visitors aren't raced.
 
 ### 4. Backend topology
 
 ```
-Cloudflare (CDN + WAF + Workers + Turnstile)
+Cloudflare (CDN + WAF + Turnstile JS)
     │
-    ├──► vanteguardlabs.com           — CF Pages (3 static files, tour animation)
-    │
-    ├──► api.vanteguardlabs.com       — CF Worker (Turnstile validation + JWT mint)
-    │       only. mint endpoint never reaches origin.
-    │
-    └──► console-demo.vanteguardlabs.com — Hetzner-class VPS, single region
+    └──► warden.vanteguardlabs.com   — Hetzner VPS, single region, single compose stack
             └── docker-compose --profile stack up -d
                 ├── nats, vault, bootstrap
                 ├── ledger, policy-engine, brain, hil, identity, proxy, console
+                ├── deep-review (forensic auditor)
                 ├── upstream-stub, simulator (always running, ambient traffic)
-                └── website
+                ├── demo-mint (HS256 token issuer behind Turnstile)
+                ├── caddy (TLS termination, Let's Encrypt)
+                └── website (Caddy-served static)
 ```
 
-VPS firewall: accept only Cloudflare IP ranges. The mint endpoint is at the edge — there is no anonymous-traffic-touching surface on the VPS.
+Subdomains served by Caddy on the same host:
 
-Marketing site and demo backend deliberately split: CDN for marketing latency, single-region VPS for demo backend. Subdomain isolation contains abuse blast radius.
+- `warden.vanteguardlabs.com` — marketing site (static).
+- `console-demo.vanteguardlabs.com` — operator surface (console + demo-mint behind same domain).
+- `console-dev.vanteguardlabs.com` — dev mirror (operator-only, `tls internal`).
+
+VPS firewall: Cloudflare IP ranges only on the public surfaces. The mint endpoint runs in-stack rather than at the CDN edge — chosen for consistency with the rest of the Rust stack, ability to emit ledger events from the mint event (the original CF-Worker plan couldn't write to NATS without a tunnel back through the VPS anyway), and simpler key rotation (one HS256 secret pinned in the compose YAML anchor `*demo-session-hs256` rather than split between Vault and Workers).
 
 ### 5. Security model
 
 #### 5.1 Token mint
 
-CF Worker holds:
+`warden-demo-mint` (Rust service, port 9200, behind Caddy at `/mint`) holds:
 
-- `TURNSTILE_SECRET` — Cloudflare Turnstile siteverify secret.
-- `DEMO_JWT_HS256` — HS256 signing key, shared with `warden-ledger` and `warden-hil` for validation. Rotated quarterly.
+- `WARDEN_DEMO_MINT_TURNSTILE_SECRET` — Cloudflare Turnstile siteverify secret.
+- `WARDEN_DEMO_MINT_HS256_SECRET` — HS256 signing key, shared with `warden-console`, `warden-ledger`, and `warden-hil` for validation via the compose YAML anchor `*demo-session-hs256`. Rotated quarterly.
 
-Worker shape:
+Mint shape:
 
 ```
 POST /mint
-  body: { "turnstile_token": "..." }
+  body: { "cf-turnstile-response": "..." } (form-encoded from the warden.vanteguardlabs.com/#contact form)
   →
   1. siteverify Turnstile (reject on fail)
-  2. KV-counter increment for client IP, reject if >5/hour
-  3. correlation_prefix = "demo-" + random4 + "-"
-  4. agent_id = "demo-" + random4 + "-bot"
-  5. JWT { sub, prefix: correlation_prefix, agent_id, exp: now+30min }
-  6. return { token, correlation_prefix, expires_at }
+  2. correlation_prefix = "demo-" + 8 hex chars
+  3. agent_id = "demo-" + 8 hex chars + "-bot"
+  4. HS256 JWT { sub: <prefix>, prefix, agent_id, exp: now+30min }
+  5. 303 → `https://console-demo.vanteguardlabs.com/#token=<jwt>`
 ```
 
-The mint event is itself logged to the ledger as `event_kind: demo.session_minted` — every demo action including session creation is on the chain.
+The mint event is currently *not* logged to the ledger; emitting `event_kind: demo.session_minted` on every mint is queued as roadmap entry B3 ("audit-trail completeness for demo lifecycle"). Today's audit-trail captures the visitor's actions starting from the *first* request through the proxy (which carries the spliced correlation ID); session-creation itself is invisible to the chain.
 
 #### 5.2 Scope enforcement
 
 **Defense-in-depth**: console proxy filters for performance, backends enforce for security.
 
-- A small token-validator (shared crate or duplicated 50-line module) parses the JWT, verifies HS256 signature, returns `{ correlation_prefix, agent_id }` or rejects.
-- `warden-ledger` read endpoints (`/audit`, `/audit/correlation/{id}`, `/stream/audit`) accept an optional `?demo_session_token=…`; when valid, filter to `correlation_id LIKE prefix || '%' OR source = 'simulator'`.
-- `warden-hil` read endpoints filter the same way; **write endpoints reject if target pending's `correlation_id` doesn't match the prefix** — the load-bearing safety check.
-- `warden-console` reads token from cookie, includes it on backend calls. Backends also re-validate.
+- A shared HS256 validator (`warden-console/src/demo_session.rs` + parallel paths in `warden-hil` and `warden-ledger`) parses the cookie/header JWT, verifies signature, returns `{ correlation_prefix, agent_id }` or rejects.
+- The proxy splices `X-Warden-Demo-Prefix` into the front of the UUID v4 correlation ID (`<prefix>-<rest of uuid>`) on inbound `/mcp`.
+- `warden-ledger` read endpoints (`/audit`, `/audit/correlation/{id}`, `/stream/audit`) honor the demo-session cookie and filter to `correlation_id LIKE prefix || '%' OR source = 'simulator'`.
+- `warden-hil` read endpoints filter the same way; **`/decide` writes reject if target pending's `correlation_id` doesn't carry the prefix** — the load-bearing safety check.
+- `warden-console` reads the token from cookie and includes it on backend calls; backends also re-validate from their own copy of the HS256 secret.
 
 The `OR source = 'simulator'` is essential — it's how the visitor sees ambient traffic and the audit page never feels dead. Don't accidentally tighten it during code review.
 
 #### 5.3 Abuse layering
 
 1. Cloudflare Bot Fight Mode + WAF (free, edge).
-2. CF rate limit on `/api/mint-session`: 5/hour per IP.
-3. Cloudflare Turnstile validation at mint endpoint.
-4. Per-token quota: 50 ledger writes / 50 HIL pendings over 30-min lifetime, then 429.
-5. VPS firewall: Cloudflare IP ranges only.
-
-Brain stays in `mock-key` mode (no Anthropic cost).
+2. Cloudflare Turnstile validation at mint endpoint.
+3. Per-token quota: 50 ledger writes / 50 HIL pendings over 30-min lifetime, then 429.
+4. VPS firewall: Cloudflare IP ranges only.
+5. Brain stays in `mock-key` mode on demo (no Anthropic cost).
+6. Deep-review pinned to `WARDEN_DEEP_REVIEW_DAILY_TOKEN_CAP=200000` (~$12/day Opus) and `WARDEN_DEEP_REVIEW_ANTHROPIC_API_KEY=mock-key` so even if the API key is ever wired, daily spend is bounded.
 
 ### 6. Operations
 
 #### 6.1 Hosting
 
-- **Marketing**: Cloudflare Pages (free).
-- **Demo backend**: Hetzner CCX13 or CCX23 (~$20–30/mo), Caddy or Cloudflare Tunnel for TLS, `docker compose --profile stack up -d`.
-- **Worker**: Cloudflare Workers free tier (100k req/day; bump to Paid $5/mo if exceeded).
-- **Backups**: weekly `tar` of `ledger-data` + `identity-data` + `hil-data` volumes to Cloudflare R2 (~$1/mo).
+- **Single Hetzner VPS** runs the entire stack: marketing site, demo-mint, console, all backends. ~$20-30/mo.
+- **TLS**: Caddy with Let's Encrypt for `warden.vanteguardlabs.com` and `console-demo.vanteguardlabs.com`; `tls internal` for the operator-only `*-dev` mirrors.
+- **Backups**: weekly snapshot of `ledger-data` volume to Cloudflare R2 (28-day lifecycle, ~$1/mo).
 
 #### 6.2 Failure mode
 
@@ -1429,25 +1444,24 @@ No status page (broadcasts outages to competitors / journalists; CISOs don't sub
 
 #### 6.4 Reset cadence
 
-**Never auto-reset.** Chain grows forever — that's the cryptographic flex. ~1KB/row × ~10k rows/day = ~3.5 GB/year, trivial. Existing post-export vacuum tooling (`chain_vacuum_cursor`) is available if disk pressure ever bites; not needed day 1.
+**Weekly auto-reset.** Schedule fires Sundays 03:00 UTC via `warden-demo-reset.service` + `warden-demo-reset.timer`; script `warden-e2e/prod/run-demo-reset.sh` wipes the `warden-prod_ledger-data` and `warden-prod_hil-data` volumes while preserving `caddy-data` (LE certs!), `secrets`, and `identity-data`. This deviates from the original "never auto-reset" plan: in practice an unbounded demo chain accumulated noisy traffic faster than the cryptographic-realness narrative needed, and resetting the chain weekly gives every visitor a freshly-coherent timeline. The hash-chain integrity story is now demonstrated on the *current* week's rows; long-term integrity demos run off the dev mirror.
 
 #### 6.5 Cost ceiling
 
-~$40/mo total. If costs cross $100/mo, something is wrong — investigate before scaling.
+~$40/mo total (Hetzner VPS + R2 backups). If costs cross $100/mo, investigate — the most likely cause is a deep-review API key with the daily cap raised. The demo VPS pins `WARDEN_DEEP_REVIEW_DAILY_TOKEN_CAP=200000` (~$12/day Opus) as the ceiling.
 
-### 7. Sequencing
+### 7. Sequencing (historical — shipped 2026-05)
 
-| Week | Deliverable | What it proves |
+| Week | Deliverable | What it proved |
 |---|---|---|
-| 1 | Tour animation (3 scenarios, auto-play + click-through) + polished marketing page + Plausible events wired | Visual story works; copy lands; conversion measurable |
+| 1 | Tour animation (3 scenarios, auto-play + click-through) + polished marketing page + Plausible events wired | Visual story worked; copy landed; conversion measurable |
 | 2 | Receipts-page handoff (live chain rows fetched by sentinel correlation-id, `curl /verify` snippet) | Cryptographic-realness flex without backend complexity |
-| **DECISION POINT — measure handoff click-through against thresholds in §2** |
-| 3 | VPS + compose deployed at `console-demo.vanteguardlabs.com`; existing console behind hardcoded basic-auth (gate against forgotten lockdown); CF DNS+WAF+rate-limits | Real console URL works; ops baseline |
-| 4 | CF Worker token mint + Turnstile gate; console demo-mode (URL-fragment → cookie); HIL approve-only filter enforcement | Per-session isolation; defense-in-depth |
-| 5 | Ledger filter enforcement; `warden-chaos-catalog` extraction (chaos-monkey becomes thin wrapper); `/demo/fire` curated attack menu | Full kick-the-tires console |
-| 6 | Auto-decide skip-prefix flag in simulator; UptimeRobot; weekly R2 backups; reset-cadence policy in `README.md`; reset-week test | Production-grade ops |
+| 3 | VPS + compose deployed at `console-demo.vanteguardlabs.com`; CF DNS + WAF in front | Real console URL works; ops baseline |
+| 4 | `warden-demo-mint` (in-stack Rust + Turnstile) + console demo-session cookie + HIL approve-prefix enforcement | Per-session isolation; defense-in-depth. *Deviation: in-stack Rust mint replaced the originally-planned CF Worker.* |
+| 5 | Ledger filter enforcement; `warden-chaos-catalog` library; `/demo/fire` curated attack menu | Full kick-the-tires console |
+| 6 | Simulator `--hil-skip-agent-id-prefix demo-`; UptimeRobot; weekly R2 backups; weekly demo-reset systemd timer | Production-grade ops |
 
-The week-3 watch-out: **don't deploy the console with auth disabled and forget to lock it down in week 4.** The hardcoded basic-auth password is the gate against this — it forces an explicit removal in week 4 rather than relying on memory.
+Watch-out that held: **never deploy the console with auth disabled on a non-loopback bind.** Console refuses to boot in this configuration unless `WARDEN_CONSOLE_ALLOW_BASIC_ADMIN_NETWORK=true` is set, which is the documented opt-in for the demo VPS (where the open posture is intentional and Caddy + Cloudflare IP allowlist gate the surface).
 
 ### 8. Out of scope
 
@@ -1459,25 +1473,27 @@ The week-3 watch-out: **don't deploy the console with auth disabled and forget t
 - Internationalization.
 - A/B testing tour variants (premature optimization for v1).
 
-### 9. Implementation questions deferred
+### 9. Implementation questions resolved during build
 
-These emerge during the build, not at design time:
+- ~~Specific attack scenario payloads~~ — live in `warden-chaos-catalog/src/lib.rs`; 13 scenarios cover injection, theft/replay, policy escape, velocity, HIL state, denylist enforcement.
+- ~~Animation copy and narrative beats per scenario~~ — finalized in the warden-website tour.
+- ~~Token-expiry-mid-session UX~~ — 401 surfaces as a banner; visitor returns to `warden.…/#contact` for a fresh token.
+- ~~CSS / brand polish on the demo console vs. operator console default~~ — single console build serves both; demo-session cookie is the only state difference.
+- ~~Domain choice~~ — resolved 2026-05-08: `warden.vanteguardlabs.com` + `console-demo.vanteguardlabs.com` (operator surface, also serves the mint endpoint at `/mint`).
+- ~~Where the `warden-chaos-catalog` crate lives~~ — new sibling repo; consumed as a path-dep by `warden-chaos-monkey` CLI and `warden-console` `/demo/fire`.
 
-- Specific attack scenario payloads (indirect-injection prompt text, wire-transfer JSON shape).
-- Animation copy and narrative beats per scenario.
-- Token-expiry-mid-session UX (probably: 401 → modal → re-Turnstile → fresh token → retry last action).
-- CSS / brand polish on the demo console vs. operator console default.
-- ~~Domain choice~~ — resolved 2026-05-08: `vanteguardlabs.com` (with `demo.` and `api.` subdomains as in §4).
-- Where exactly the `warden-chaos-catalog` crate lives (new repo vs. submodule of warden-chaos-monkey).
+Still open after ship:
 
-### 10. Confirmed before writing code
+- **`demo.session_minted` chain row.** Mint event isn't currently appended to the ledger; tracked as roadmap entry B3 ("audit-trail completeness for demo lifecycle").
 
-The four operational tradeoffs that gate the green light, all confirmed:
+### 10. Confirmed before writing code (historical record)
 
-1. The week-2 kill-switch is real — receipts-only ships if metrics say so.
+The four operational tradeoffs that gated the green light, all confirmed at the time and still held during the build:
+
+1. The week-2 kill-switch was real — receipts-only would have shipped if metrics had said so. Metrics cleared the threshold; the full handoff shipped.
 2. Single VPS, no HA, "best effort business hours" demo SLA is acceptable.
-3. `warden-chaos-catalog` extraction is in scope; chaos-monkey becomes a thin wrapper.
-4. Shared HS256 JWT secret across CF Worker + ledger + HIL is acceptable, rotated quarterly.
+3. `warden-chaos-catalog` extraction is in scope; chaos-monkey becomes a thin wrapper. **Held.**
+4. Shared HS256 JWT secret across the mint service + ledger + HIL is acceptable, rotated quarterly. **Held**, except substrate flipped from CF Worker to in-stack Rust mid-build (see §3.2 — the secret-rotation story didn't change).
 
 ---
 
@@ -1854,6 +1870,9 @@ All knobs are env-driven. Defaults in parens.
 | `WARDEN_DEEP_REVIEW_HISTORY_PER_CORRELATION` | `50` | Per-correlation history cap |
 | `WARDEN_DEEP_REVIEW_METRICS_PORT` | `8087` | Prometheus `/metrics` port. Sibling `identity` owns `8086` |
 | `WARDEN_DEEP_REVIEW_ANTHROPIC_API_KEY` | `mock-key` | API key; sentinel `mock-key` selects `MockProvider` |
+| `WARDEN_DEEP_REVIEW_NATS_URL` | `nats://localhost:4222` | NATS connect string. Same URL the proxy/brain/ledger consumers use |
+| `WARDEN_DEEP_REVIEW_FORENSIC_SUBJECT` | `warden.forensic` | Subscribe subject for inbound forensic rows |
+| `WARDEN_DEEP_REVIEW_FINDINGS_SUBJECT` | `warden.forensic` | Publish subject for emitted `deep_review_*` rows. Defaults to the same subject so the ledger picks them up via its existing consumer; split only when an operator runs deep-review against a dedicated audit stream |
 
 Retry algorithm: full-jitter exponential backoff at `1s / 4s / 16s`. Each delay is sampled uniformly from `[0, base]` per the AWS Architecture Blog full-jitter prescription. Total wall-clock is enforced via `retry_budget` even if individual sleeps complete fast — a slow vendor call that returns one second before the budget expires is not retried.
 
@@ -1875,7 +1894,7 @@ Three sentinel types (`finding` / `failed` / `skipped`) make every coverage gap 
 
 ### 7. PII handling
 
-`warden-deep-review/src/pii.rs` is an in-tree regex masker. Patterns: SSN, email, IPv4, credit-card (Luhn-shape 13-19 digit), PEM blocks, AWS access keys. Sentinels: `[SSN]`, `[EMAIL]`, `[IPV4]`, `[CC]`, `[PEM]`, `[AWS_KEY]`. The masker is idempotent — masking twice produces the same string — verified by the compliance harness on every benchmark case.
+`warden-deep-review/src/pii.rs` is an in-tree regex masker. Patterns: SSN, email, IPv4, credit-card (Luhn-shape 13-19 digit), PEM blocks, AWS access keys. Sentinels: `[SSN]`, `[EMAIL]`, `[IPV4]`, `[CC]`, `[PEM_PRIVATE_KEY]`, `[AWS_ACCESS_KEY_ID]`. The masker is idempotent — masking twice produces the same string — verified by the compliance harness on every benchmark case.
 
 Mask is applied to every string leaf in the event JSON *before* the prompt builder strips brain-verdict fields. Defense in depth: even fields that get stripped never reach the vendor API in raw form.
 
@@ -1883,19 +1902,21 @@ The masker is deliberately small. A future v1.x+1 task is to swap it for the mor
 
 ### 8. Operator surface
 
-**Today (shipped):**
+**Shipped:**
 
 - Findings appear as normal rows in `/audit` with `method` ∈ `deep_review_*`.
 - `/verify` walks the chain over the new rows transparently (no ledger code change).
 - Prometheus `/metrics` exposes per-verdict and per-failure-reason counters on the configured port.
 - Slack-shape page on Red + confidence ≥ floor when `WARDEN_DEEP_REVIEW_ALERT_WEBHOOK` is set.
+- `/deep-review` console route — paginated list (50/page), columns timestamp · correlation (short hash) · agent · model · brain → deep verdict · confidence · latency. Filters: date range, verdict, brain_delta, method. Shipped in `warden-console` v0.6.1; nav-link wiring in v0.6.2.
+- `/audit/agents/{id}/narrative` deep-review summary strip — last-7d findings count, brain_delta donut, top disagreement category, link to filtered `/deep-review`. Same v0.6.1 cut.
+- Click-through from any finding row into the unified request timeline so brain verdict + deep-review finding + any HIL events are visible in chain order. (Drill-down lands in the existing `/audit/correlation/{id}` view, which is chain-version-agnostic.)
+- Demo-prefix gate mirrors `/audit`: visitor sessions only see their own `correlation_id LIKE <demo-prefix>%` rows.
 
-**Deferred (callout — see roadmap §"v1.x — in flight"):**
+**Deferred (callout — see roadmap §"v1.x+1"):**
 
-- `/deep-review` console route: paginated list (50/page), columns timestamp · correlation (short hash) · agent · model · brain → deep verdict · confidence · latency. Filters: date range, verdict, brain_delta.
-- `/narrative` summary strip: last-7d findings count, brain_delta donut, top disagreement category.
-- Click-through from a finding into the unified request timeline so brain verdict + deep-review finding + any HIL events are visible in chain order.
-- Helm chart values under `warden-charts/` for K8s sidecar deployments.
+- Helm chart values under `warden-charts/` for K8s sidecar deployments — folded into the umbrella-chart scaffold work since the repo is currently a README stub.
+- Published baseline-accuracy benchmark number against real Opus (operator-run; the in-CI benchmark uses `MockProvider`).
 
 ### 9. Test surface
 
@@ -2047,8 +2068,17 @@ defense-in-depth behind it.
 
 ### Layer 2 — warden-brain
 
-Semantic inspection. Three signals: intent classifier (Haiku), persona
-drift (Haiku), indirect-injection scanner (Haiku + heuristic).
+Semantic inspection. Five signals: intent classifier (Haiku), persona
+drift (Haiku), indirect-injection scanner (Haiku + heuristic),
+malicious-code detector (Haiku + regex; gated on the write-shape
+method set so it only fires on file-content writes), and
+compromised-package detector (bundled-list exact match + Haiku
+typosquat shape check; gated on shell-shape methods +
+package-manager prefix regex). The last two land verdicts via the
+same `intent_category` + `authorized` axes as the classifier — no
+schema change. Bundled list lives in
+`warden-brain/data/compromised_packages.json` and refreshes weekly
+via an OSV.dev cron PR.
 
 #### Spoofing & Tampering
 
@@ -2261,9 +2291,16 @@ operator actions are anchored.
 
 #### Information disclosure
 
-Private keys never leave the identity service process — Ed25519
-keypairs are loaded from `WARDEN_IDENTITY_SIGNING_KEY_PATH` at boot,
-held in-memory only, exposed only as JWKS public material.
+Private keys never leave Vault. `warden-identity` holds no private
+key material in-process: every signature goes out over the `vaultrs`
+client to Vault Transit (`transit/sign/<key>`). The identity service's
+own surface exposes only public material — JWKS at `GET /jwks.json`
+and the federation bundle at `GET /.well-known/spiffe-bundle`. A
+compromise of the identity host doesn't compromise the signing key;
+rotating the issuer is a `vault write -f transit/keys/<name>/rotate`,
+not a Warden code path. An OSS / `warden-lite` alt-backend that loads
+an in-process Ed25519 keypair from a file (so a small deployment can
+skip Vault) is queued as v1.x+1 work — see roadmap entry B13.
 
 #### Denial of service
 

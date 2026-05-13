@@ -41,6 +41,7 @@ The host-cargo runner (`run.sh`) builds in **debug profile on purpose** — Appl
 12. [Supply chain & threat model](#12-supply-chain--threat-model)
 13. [Wire contracts](#13-wire-contracts)
 14. [Known gaps](#14-known-gaps)
+15. [Forensic-tier deep review](#15-forensic-tier-deep-review)
 
 ---
 
@@ -1681,12 +1682,21 @@ These are **explicit open items**, tracked here for completeness against the Imp
 
 ### 14.4 Spec-vs-code drift (documentation hygiene)
 
-These are working code with stale spec wording:
+The 2026-05-13 spec audit (recorded in `/home/debian/claude/.claude/plans/replicated-enchanting-micali.md`) walked the spec against current code and closed the following items in `warden-specs@v0.6.3`. They're listed here as the historical record:
 
-- **Registration mode default is `enforce`, not `warn`** — `TECH_SPEC.md#agent-onboarding-wao` §6.3 line 483 still describes the rollout-phase `warn` default. Code hardwires `Enforce`.
-- **HIL `WARDEN_HIL_DECIDE_TOKEN` validated per-request, not at boot** — Operator-auth §6 says "Both processes refuse to boot if the configured mode requires the token and it is missing." Console does; HIL only validates per-request.
-- **Non-`text/*` body on `/export/regulatory` returns 400, not silently dropped** — Regulatory §10 says "ignored as readme." Code returns 400 with diagnostic. The code behavior is arguably better.
-- **Action signing uses `GENESIS_PREV_HASH` placeholder, not ledger tail** — Identity §5.2 specifies signature commits to `prev_hash` from ledger. Proxy uses 64-zero constant to avoid two-RTT. Documented in `warden-proxy/src/sign.rs` module doc comment.
+- **Registration mode default `enforce`, not `warn`** — *Fixed in spec v0.6.3* (Agent-onboarding §6.3).
+- **HIL `WARDEN_HIL_DECIDE_TOKEN` per-request validation** — *Spec softened in v0.6.3* (Operator-auth §6); boot-time validation queued as roadmap entry B12.
+- **Non-`text/*` body on `/export/regulatory` returns 400, not silently dropped** — *Fixed in spec v0.6.3* (Regulatory §10).
+- **Action signing uses `GENESIS_PREV_HASH` placeholder, not ledger tail** — *Documented in spec v0.6.3* (Identity §5.2 carries the deviation note + integrator guidance).
+- **Identity signing is Vault Transit only, not file-loaded Ed25519** — Threat-model §"warden-identity" had claimed in-process Ed25519 keypairs loaded from `WARDEN_IDENTITY_SIGNING_KEY_PATH`; reality is `vaultrs` to Vault Transit. *Spec softened in v0.6.3*; alt-backend (file-loaded Ed25519 for warden-lite/OSS) queued as roadmap entry B13.
+- **Deep-review PII sentinel names** — Spec said `[PEM]` / `[AWS_KEY]`; code emits `[PEM_PRIVATE_KEY]` / `[AWS_ACCESS_KEY_ID]`. *Fixed in spec v0.6.3* (Forensic-tier deep review §7).
+- **Deep-review env-var table missing three knobs** — `WARDEN_DEEP_REVIEW_NATS_URL`, `_FORENSIC_SUBJECT`, `_FINDINGS_SUBJECT` were in code but not in spec table. *Fixed in spec v0.6.3* (Forensic-tier deep review §5).
+- **Deep-review `/deep-review` console route + narrative strip shipped** — Spec §8 still listed under "Deferred". *Fixed in spec v0.6.3* — now under "Shipped" with v0.6.1 + v0.6.2 commit pointers.
+- **"No admin role" vs. `Role::Admin`** — Operator-auth §3 contradicted Console-policy-management §8. *Fixed in spec v0.6.3* — Operator-auth §3 now acknowledges the policy-management admin tier explicitly.
+- **Demo experience full-section drift** — Spec described 6-week build with CF Worker mint, `--auto-decide-skip-prefix` flag, etc. Reality is in-stack Rust `warden-demo-mint`, `X-Warden-Demo-Prefix` correlation-ID splicing, `--hil-skip-agent-id-prefix demo-` simulator flag. *Fixed in spec v0.6.3* with historical-substrate-flip callout preserved.
+- **Brain `malicious_code` + `compromised_package` signals undocumented** — Shipped as v1.x roadmap; spec threat-model still listed three signals. *Fixed in spec v0.6.3* — now describes five signals.
+- **HIL `/identities/*` CRUD endpoints undocumented** — Wire table added to Operator-auth §4 in v0.6.3.
+- **`X-Warden-Demo-Prefix` proxy header undocumented** — Now mentioned in Demo experience §3.2 + §5.2.
 
 ### 14.5 Threat-model open items (deferred, intentional)
 
@@ -1711,6 +1721,124 @@ Listed in the relevant section's "What this spec deliberately does not include":
 - **Four-eyes / separation-of-duties** (Operator-auth §8)
 - **Federated config view, mutation surface, backend versions** on `/config` (Console-config §11)
 - **Operator preferences** v2 (`/config` §10)
+
+---
+
+## 15. Forensic-tier deep review
+
+The async heavy-LLM auditor (`warden-deep-review`) layered on top of the four-layer security pipeline. It does *not* gate live traffic — that's HIL's job — but reviews a sampled slice of the audit stream with a substantially smarter model (Opus 4.7) to catch what Haiku missed and to deepen verdicts on what it flagged. See `TECH_SPEC.md#forensic-tier-deep-review` for the full design.
+
+### 15.1 Async NATS consumer on `warden.forensic`
+
+**Concept.** Deep-review subscribes to the same subject the ledger consumes from. Its emitted findings go back onto the same subject so the ledger picks them up via its existing consumer — no second subscription, no second envelope. The consumer filters its own emissions to prevent an infinite loop (matches on `method ∈ {deep_review_finding, deep_review_failed, deep_review_skipped}`).
+
+**Implementation.** `warden-deep-review/src/consumer.rs`. NATS core pubsub (not JetStream — matches existing infra without an `-js` flag bump). Per-agent ring-buffer history populated unconditionally so the next event has full context regardless of sampling outcome. Tokio semaphore for bounded concurrency (default 4).
+
+**Verify.**
+
+```bash
+# Boot the stack with the deep-review profile enabled
+./repos/warden-e2e/dev/run.sh
+
+# Drive any agent → see deep-review rows land in /audit
+docker logs warden-dev-deep-review-1 | grep -E 'deep_review_(finding|failed|skipped)'
+```
+
+### 15.2 Per-event pipeline (sample → permit → budget → mask → prompt → review → emit)
+
+**Concept.** Ten-step pipeline per incoming event: receive → self-emission filter → record in history → sample decision → semaphore permit → budget gate → PII mask → prompt build (strips brain verdict) → provider call (with retry/backoff) → emit finding (or sentinel).
+
+**Implementation.** `warden-deep-review/src/lib.rs::review_one_event`. Brain verdict fields (`authorized`, `intent_category`, `reasoning`, `signal`, `persona_drift_score`, `injection_detected`, `malicious_code_detected`, `compromised_package_detected`, plus `policy_decision.{allow, reasons, review}`) are *stripped* from the prompt — independent reasoning is the entire value proposition.
+
+### 15.3 `brain_delta` computation (server-side)
+
+**Concept.** Three-valued summary of whether the heavy model agreed: `Agreed` / `Escalated` / `Downgraded`. The single number ops care about.
+
+**Implementation.** `warden-deep-review/src/finding.rs::compute_brain_delta`. Table:
+
+| Brain authorized | Deep verdict | brain_delta |
+|---|---|---|
+| true | Green | Agreed |
+| true | Yellow | Escalated |
+| true | Red | Escalated |
+| false | Green | Downgraded |
+| false | Yellow | Downgraded |
+| false | Red | Agreed |
+
+### 15.4 Three sentinel event types
+
+**Concept.** Three `method` values on the existing `LogRequest` envelope distinguished by their `policy_decision` JSON payload shape — no `warden-ledger` wire change.
+
+**Implementation.**
+
+| `method` | When | Payload |
+|---|---|---|
+| `deep_review_finding` | Successful review | `{verdict, confidence, reasoning, brain_delta, reviewing_model, review_latency_ms, reviewed_at, original_method, original_correlation_id}` |
+| `deep_review_failed` | Retry budget exhausted | `{reason ∈ Timeout\|Vendor5xx\|ParseError\|QuotaExceeded\|RateLimited\|UnknownVendorError, reviewing_model, original_method, original_correlation_id}` |
+| `deep_review_skipped` | Daily token cap hit | `{reason: "budget", original_method, original_correlation_id}` |
+
+**Verify.** `curl http://localhost:8083/audit | jq '.[] | select(.method | startswith("deep_review_"))'`.
+
+### 15.5 Daily token budget (UTC midnight reset)
+
+**Concept.** Per-day cap on `input + output` tokens to bound spend. Reset at UTC midnight by day-ordinal comparison.
+
+**Implementation.** `warden-deep-review/src/budget.rs`. Default `WARDEN_DEEP_REVIEW_DAILY_TOKEN_CAP=1_000_000` (~$60/day Opus 4.7). Demo VPS pinned to `200_000` (~$12/day) so a stuck visitor session can never rack up a bill. `try_reserve` is the gate before any vendor call; `record_actual` reconciles the estimate with the response's `usage` field on success.
+
+### 15.6 PII regex masker (six patterns, idempotent)
+
+**Concept.** Defense in depth — every string leaf in the event JSON is regex-masked before the prompt builder strips brain-verdict fields, so even fields that get stripped never reach the vendor API in raw form.
+
+**Implementation.** `warden-deep-review/src/pii.rs`. Patterns + sentinels:
+
+| Pattern | Sentinel |
+|---|---|
+| SSN (`\d{3}-\d{2}-\d{4}` + variants) | `[SSN]` |
+| Credit card (Luhn-shape 13-19 digit) | `[CC]` |
+| Email | `[EMAIL]` |
+| IPv4 | `[IPV4]` |
+| PEM private-key block | `[PEM_PRIVATE_KEY]` |
+| AWS access key (`AKIA…`) | `[AWS_ACCESS_KEY_ID]` |
+
+The masker is idempotent — masking twice produces the same string — verified by the compliance harness on every benchmark case.
+
+### 15.7 Alert webhook (Red + high-confidence, rate-limited per agent)
+
+**Concept.** Page on `verdict == Red && confidence >= page_confidence` (default `0.85`). Rate-limited per agent (token bucket, refill 1/min) so a misbehaving agent can't storm the alert channel.
+
+**Implementation.** `warden-deep-review/src/alert.rs`. Slack-shape JSON POST when `WARDEN_DEEP_REVIEW_ALERT_WEBHOOK` is set; over-limit pages are dropped silently — the finding still lands in the ledger so the alert can be reconstructed.
+
+**Verify.**
+
+```bash
+# Stub sink
+nc -lk 9999 &
+WARDEN_DEEP_REVIEW_ALERT_WEBHOOK=http://localhost:9999/page ./run.sh
+# Drive a scenario known to produce a Red verdict
+# Observe one JSON POST on the sink; subsequent Reds from the same agent within 1min are dropped
+```
+
+### 15.8 25-case seed benchmark + hermetic compliance harness
+
+**Concept.** Seed benchmark targeting the four Haiku blind-spot classes (slow exfiltration, persona drift, indirect injection via tool output, recon under varied encodings). Hermetic so CI runs without vendor tokens.
+
+**Implementation.** `warden-deep-review/benchmark/cases.json` — 25 cases across 6 categories: slow_exfiltration (4), persona_drift (4), indirect_injection (4), recon_probing (6), benign_workflow (5), mixed (2). Verdict distribution: 11 Red / 8 Yellow / 6 Green. `tests/compliance.rs` drives the full corpus through prompt builder + PII mask + `MockProvider`; published baseline against real Opus is operator-run (token cost, network dependence).
+
+### 15.9 Console `/deep-review` route + narrative summary strip
+
+**Concept.** Operator surface for the new findings. Paginated list view + a summary strip on the per-agent `/audit/agents/{id}/narrative` so the answer to "did this thing earn its keep?" is one click away.
+
+**Implementation.** `warden-console/src/handlers.rs::deep_review_index` + `templates/deep_review.html` (paginated 50/page, columns timestamp · correlation · agent · model · brain → deep verdict · confidence · latency, filters: kind/verdict/brain_delta/per_page). Narrative-strip in `templates/audit_narrative.html` shows last-7d findings count, brain_delta donut, top disagreement category, link to filtered `/deep-review`. Demo-prefix gate mirrors `/audit`.
+
+**Verify.**
+
+```bash
+# Local
+curl http://localhost:8085/deep-review
+
+# Live demo VPS
+curl -sf https://console-demo.vanteguardlabs.com/deep-review | grep -o 'Deep review'
+```
 
 ---
 
