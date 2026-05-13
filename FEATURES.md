@@ -1656,13 +1656,34 @@ curl -X POST http://localhost:8081/inspect -H 'content-type: application/json' \
 
 These are **explicit open items**, tracked here for completeness against the Implemented-Features inventory. Not a roadmap commitment — each one waits on a triggering event.
 
-### 14.1 `POST /revoke` endpoint (functional)
+### 14.1 ~~`POST /revoke` endpoint~~ (shipped 2026-05-13 in v0.6.4)
 
-**Concept.** The spec table at `TECH_SPEC.md#identity-service` §4.1 lists `POST /revoke` for Operator-WebAuthn-gated revocation of SVIDs and grants. Today, revocation only happens implicitly via short-TTL expiry + suspend/decommission lifecycle rows.
+`POST /revoke` revokes either a specific instance SVID or a delegation grant. Body discriminated on `kind`:
 
-**Status.** Not implemented; no route in `warden-identity/src/lib.rs::build_app`.
+```json
+POST /revoke
+{ "kind": "svid",  "svid_id": "<id>",  "reason": "..." }
+{ "kind": "grant", "jti":     "<jti>", "reason": "..." }
+```
 
-**Workaround.** `wardenctl agents suspend <id>` for the agent-record path; SVID expiry (≤1h TTL) for the cert path.
+The handler validates the row exists, hasn't already been revoked, then sets `revoked_at` + `revoke_reason` on `svids` / `grants` and emits a chain v3 `svid.revoked` / `grant.revoked` lifecycle row via the existing outbox path (Vault-Transit signed). Auth: `agents:admin` capability in the row's tenant — spec called it "Operator WebAuthn" but identity terminates on OIDC + caps, admin is the cap-equivalent kill switch. **Today's effect**: `revoked_at` is set + the audit chain records the event. Proxy-side denylist consumption (so revocation kills in-flight requests) is a follow-up; combined with short-TTL SVIDs (≤1h) the effective revocation window is bounded by TTL expiry.
+
+**Implementation.** `warden-identity/src/revoke.rs` (handler + tests); route at `lib.rs::build_app` between `/grant` and `/sign`.
+
+**Verify.**
+
+```bash
+# happy path
+curl -X POST -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -d '{"kind":"svid","svid_id":"<svid-id>","reason":"compromise"}' \
+  http://localhost:8086/revoke
+# → 200 { "revoked_at": "2026-05-13T…" }
+
+# double-revoke → 409 already_revoked
+# unknown id → 404 not_found
+# missing admin cap → 403 missing_capability:agents:admin
+```
 
 ### 14.2 `--delegation-mix` simulator flag (test fidelity)
 
@@ -1672,13 +1693,9 @@ These are **explicit open items**, tracked here for completeness against the Imp
 
 **Workaround.** Drive multi-principal traffic manually via direct `wardenctl agents create` + per-agent SVID issuance.
 
-### 14.3 Demo experience (entire spec section)
+### 14.3 ~~Demo experience~~ (shipped — `demo.session_minted` closed 2026-05-13)
 
-**Concept.** `TECH_SPEC.md#demo-experience` describes a 6-week build plan: guided tour at `vanteguardlabs.com/demo`, Cloudflare Worker token mint, `warden-console` "demo-mode" with URL-fragment → cookie auth, token-scoped read filters in ledger and HIL, `warden-chaos-catalog` library extracted from `warden-chaos-monkey`, `/demo/fire` page, `demo.session_minted` event_kind, simulator `--auto-decide-skip-prefix`.
-
-**Status.** Marketing-site mock exists (`warden-website/` 3-file static page); no backend integration. Module status line in the spec accurately says: "new, marketing/funnel work."
-
-**Workaround.** None — book a demo or run the compose stack locally.
+The entire demo flow has shipped — substrate flipped from Cloudflare Worker mint to in-stack Rust `warden-demo-mint`; `X-Warden-Demo-Prefix` proxy header splices the JWT prefix into correlation IDs; simulator `--hil-skip-agent-id-prefix demo-` keeps visitor pendings off the auto-decider. The last open hold-out — emitting a `demo.session_minted` ledger row — landed 2026-05-13 (see §14.7). The full historical-substrate-flip narrative lives at `TECH_SPEC.md#demo-experience`.
 
 ### 14.4 Spec-vs-code drift (documentation hygiene)
 
@@ -1721,6 +1738,16 @@ Listed in the relevant section's "What this spec deliberately does not include":
 - **Four-eyes / separation-of-duties** (Operator-auth §8)
 - **Federated config view, mutation surface, backend versions** on `/config` (Console-config §11)
 - **Operator preferences** v2 (`/config` §10)
+
+### 14.7 v0.6.4 ship log (2026-05-13)
+
+Five v1.x+1 polish items shipped in lockstep on the 2026-05-13 quick-wins blitz. Spec text in `TECH_SPEC.md` updated in the same commit.
+
+- **`POST /revoke` endpoint** — `warden-identity/src/revoke.rs`. Full wire shape + verification in §14.1 above.
+- **`demo.session_minted` ledger event** — `warden-demo-mint` publishes a chain v1 forensic event to `warden.forensic` on every successful mint. `WARDEN_DEMO_MINT_NATS_URL=nats://nats:4222` in `warden-e2e/prod/docker-compose.yml`. Payload built by `mint::build_session_minted_payload`; `correlation_id = <prefix>-mint` so downstream visitor activity joins back to the session-creation row.
+- **`warden_hil_avg_latency_seconds` metric** — `POST /decide/{id}` is wrapped with an RAII `DecideLatencyGuard` that records on every exit (success + error). Registered via `metrics::describe_histogram!` in `warden-hil/src/main.rs`. Runbooks already cited the name; it now actually exports. Prometheus average is `rate(_sum)/rate(_count)`.
+- **`WARDEN_HIL_REQUIRE_DECIDE_TOKEN` boot guard** — opt-in env var. When set to `true`/`1`, HIL refuses to boot unless `WARDEN_HIL_DECIDE_TOKEN` is also set. Validation lives in `auth::validate_decide_token_requirement` (pure function so tests don't touch `std::env`). Matches the original spec promise softened in v0.6.3 (`TECH_SPEC.md#operator-authentication` §6).
+- **Two chaos-monkey supply-chain scenarios** — `malicious_code_reverse_shell` (`write_file` tool + classic reverse-shell needle from brain's `MALICIOUS_CODE_NEEDLES`) and `compromised_package_install` (`execute_command` tool + `pip install jeIlyfish` — a PyPI typosquat in brain's bundled `compromised_packages.json`). New `Category::SupplyChain` variant. Both expect deny verdicts via brain's signal-fold `BLOCK: <signal>…` override.
 
 ---
 
