@@ -224,6 +224,42 @@ For the console UI counterpart, see §4.10.
 curl http://localhost:8083/agents | jq .agents
 ```
 
+### 1.11 Pluggable storage backend (SQLite + Postgres)
+
+**Concept.** Until v0.5.0 the ledger was SQLite-only, which capped deployment to a single replica — concurrent writers on a shared PVC corrupt SQLite even with WAL, and SQLite's locking doesn't reach across hosts. The pluggable backend lifts that pin: Postgres mode lets N ledger replicas share one managed Postgres instance, with the `entries.seq UNIQUE` constraint serializing the chain append across pods. SQLite stays the default for single-node deployments and dev. **The chain hash is backend-agnostic** — byte-identical `entry_hash` values across SQLite and Postgres for the same `AppendRequest` sequence, enforced by a cross-backend equivalence test. A chain produced under one backend verifies under the other.
+
+**Implementation.** `LedgerStore` trait in `warden-ledger/src/storage.rs` covers every chain primitive — `append`, `latest_seed`, `read_for_agent` / `_paged` / `count`, `read_for_correlation`, `read_all`, `read_after_seq`, `list_audit_agent_ids`, `read_lifecycle_for_agent`, `read_payload`, `ping`. Two impls: `SqliteLedgerStore` (default, file-backed) and `PostgresLedgerStore` behind the `postgres` cargo feature (`tokio-postgres` + `deadpool-postgres`). `AppState.store: Arc<dyn LedgerStore>` is always set; `AppState.conn: Option<Arc<Mutex<Connection>>>` is populated only in SQLite mode so SQLite-shaped reporting queries (cold-tier export, regulatory bundle, Iceberg metadata, egress sweeper) keep their direct connection. Verify also flows through the trait — `verify_chain_via_store` mirrors per-row version dispatch + JWKS signature check + v3 payload integrity. Equivalence test at `tests/storage_equivalence.rs` feeds 16 deterministic fixtures (v1/v2/v3) through both backends and asserts byte-identical hashes.
+
+Backend select at boot:
+
+```
+WARDEN_LEDGER_BACKEND={sqlite|postgres}   # default: sqlite
+WARDEN_LEDGER_PG_URL=postgres://...       # required when backend=postgres
+WARDEN_LEDGER_DB=/var/lib/warden/...      # sqlite-mode only
+```
+
+Postgres mode disables the SQLite-only routes (`POST /export`, `GET /exports`, `POST /export/regulatory`, the egress sweeper) — they return `503 Service Unavailable` with a diagnostic. SIEM ingest in Postgres mode wires directly against the chain table; cold-tier export is the only feature that requires SQLite for now.
+
+Helm wiring lives in `warden-e2e/charts/warden/values.yaml` — SQLite mode pinned to `replicas: 1`, Postgres mode lifts the pin. The "Postgres ledger mode" section of `warden-e2e/HA_RUNBOOK.md` documents the multi-replica deploy + the disabled-feature list.
+
+**Verify.**
+
+```bash
+# SQLite (default)
+cargo run --bin warden-ledger
+
+# Postgres
+docker run -d --rm --name pg -p 5432:5432 -e POSTGRES_PASSWORD=test postgres:16-alpine
+WARDEN_LEDGER_BACKEND=postgres \
+  WARDEN_LEDGER_PG_URL="postgres://postgres:test@127.0.0.1:5432/postgres" \
+  cargo run --features postgres --bin warden-ledger
+
+# Cross-backend equivalence
+WARDEN_TEST_POSTGRES_URL="postgres://postgres:test@127.0.0.1:5432/postgres" \
+  cargo test --features postgres --test storage_equivalence
+# test sqlite_and_postgres_produce_identical_chain ... ok
+```
+
 ---
 
 ## 2. HIL — human-in-the-loop
