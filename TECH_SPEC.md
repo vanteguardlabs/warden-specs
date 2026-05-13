@@ -13,6 +13,7 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 - [Regulatory export](#regulatory-export) — EU AI Act Article 11/12 audit bundle
 - [Demo experience](#demo-experience) — public-facing demo design
 - [Console policy management](#console-policy-management) — read + CRUD + activate/deactivate of `*.rego` and `*.json` policies from the console
+- [Forensic-tier deep review](#forensic-tier-deep-review) — async heavy-LLM auditor running against a sampled slice of the audit stream
 - [Threat model](#threat-model) — STRIDE-organized, layer-by-layer
 - [Runbooks](#runbooks) — five on-call failure modes
 
@@ -1729,6 +1730,199 @@ The eight architectural decisions resolved by the `/grill-me` walkthrough, all c
 
 ---
 
+## Forensic-tier deep review
+
+
+Companion to [Layer 2 — warden-brain](#layer-2--warden-brain) (sub-second classifier on the proxy hot path) and [Layer 4 — warden-ledger](#layer-4--warden-ledger) (the forensic store). Where brain's value proposition is sub-second verdicts via Haiku 4.5, `warden-deep-review` is the complementary forensic tier — asynchronous, slow, expensive, and substantially smarter. Runs Opus 4.7 (MVP single-provider) against a sampled slice of the audit stream to catch what Haiku missed and deepen verdicts on what it flagged.
+
+**This service does not gate live traffic.** HIL is the inline blocking surface; deep-review is retrospective by design. A vendor outage, a quota burst, or a slow review must never back up the audit stream and starve brain → ledger writes. Every failure mode soft-fails per event with a queryable sentinel.
+
+**Module status:** **shipped 2026-05-13** at `warden-specs/VERSION` 0.6.0. Lives in `warden-deep-review` (new repo, NATS consumer + LLM provider trait + per-agent history ring buffer + budget + retry + alert sink), wired into `warden-e2e/{prod,dev}/docker-compose.yml` as a service in the `stack` profile. **Adjacent surfaces deferred:** `/deep-review` console route, `warden-charts/` Helm values, baseline-accuracy benchmark publication.
+
+### 1. What this closes
+
+| Gap | Today (brain only) | After this section |
+|---|---|---|
+| Slow exfiltration across many events | Haiku sees one event at a time; cannot stitch 50 reads + one egress into a pattern | Per-agent history fed into Opus prompt; pattern-level reasoning |
+| Persona drift over a session | Haiku sees current event in isolation | History + agent enrollment string in prompt; "support assistant now invoking shell" lights up |
+| Indirect injection via tool output | Haiku scans current input; misses that the *prior* tool output injected the steering payload | History carries prior tool outputs; the injection → obey sequence is visible |
+| Recon under varied encodings | Haiku evaluates each path on its own; `%2Fetc%2Fpasswd` looks like a stray bug | Sequence across encodings reads as probing |
+
+The fast classifier remains in place — it's still the only thing fast enough to gate live traffic. Deep-review is the second-opinion layer; `brain_delta` (agreed / escalated / downgraded) is the operator-facing summary of whether the heavy model arrived at the same call.
+
+### 2. Scope and non-goals
+
+**In scope (v1.x MVP):**
+
+- Single provider — `AnthropicOpusProvider` (Opus 4.7).
+- NATS core pubsub consumer on `warden.forensic` (subject the proxy already publishes forensic rows to; matches existing infra without a JetStream upgrade).
+- Per-event budget gate, retry, concurrency limit, paging.
+- Three sentinel ledger event types (`deep_review_finding` / `deep_review_failed` / `deep_review_skipped`).
+- Reuses existing `LogRequest` envelope — no `warden-ledger` wire change.
+- Deterministic `MockProvider` in-repo so e2e and CI do not burn vendor tokens.
+- 25-case seed benchmark covering all four blind-spot classes + hermetic compliance harness.
+
+**Explicitly out of scope (v1.x non-goals):**
+
+- Ensemble across vendors (Opus + Gemini + GPT majority vote) — speculative complexity before single-model benchmark data exists.
+- Sequential escalation (Opus → Gemini → GPT on disagreement) — same reasoning.
+- Per-tenant cost attribution — multi-tenant budgeting needs a deployment-level tenancy model warden doesn't have yet.
+- Adaptive sampling (auto-tune sample rate against remaining budget) — manual knobs for v1; auto-tune is polish.
+- Dead-letter queue for failed reviews — retry + soft-fail covers transient failures; add once telemetry shows sustained outages.
+- Auto-quarantine via identity service on Red findings — structurally unsafe with async detection; reconsider only if false-positive rate is essentially zero.
+- Pre-emptive HIL on agent's next request post-Red — cross-component state, TTL questions, race conditions; deferred with a proper design.
+- Persona-aware prompting (feed `warden-brain/personas/` into the prompt) — worth measuring against v1 baseline first.
+- JetStream-durable consumer — MVP uses core NATS to match existing `nats:2` container (no `-js` flag); upgrading is an e2e infra change.
+- Path-dep on `warden-brain/src/pii.rs` — MVP ships a small in-tree regex masker (`warden-deep-review/src/pii.rs`); merging masker codebases is a v1.x+1 swap-in.
+
+### 3. Architecture
+
+```
+                      proxy (publishes forensic row)
+                                 ↓
+                          warden.forensic ── NATS core
+                          ↓                ↓
+              warden-ledger        warden-deep-review
+              (appends row)         (samples → review → emits finding)
+                                              ↓
+                                   warden.forensic (republishes)
+                                              ↓
+                                   warden-ledger
+                                   (appends finding row)
+```
+
+Deep-review subscribes to the same subject the ledger consumes from. Its emitted findings go back onto the same subject so the ledger picks them up via its existing consumer — no second subscription, no second envelope. The consumer filters its own emissions to prevent an infinite loop (matches on `method ∈ {deep_review_finding, deep_review_failed, deep_review_skipped}`).
+
+Per-event pipeline:
+
+1. **Receive** — NATS message arrives, parsed as `Value`. Self-emission filter ignores own `method` values. Recorded in per-agent ring buffer (`History`) unconditionally so the next event has full context regardless of sampling outcome.
+2. **Sample** — `should_sample(brain_authorized, rate_flagged, rate_green)`. Default: 100% flagged, 1% Green for blind-spot mitigation.
+3. **Permit** — `tokio::sync::Semaphore::acquire_owned()`; bounded concurrent dispatch (default 4). Backpressure naturally surfaces through NATS subscriber queue.
+4. **Budget gate** — `budget.try_reserve(estimated_tokens)`. On exceed: emit `deep_review_skipped { reason: "budget" }` sentinel and return.
+5. **PII mask** — `pii::mask_pii` over every string leaf in the event JSON. Defense in depth; the prompt builder strips brain-verdict fields downstream regardless.
+6. **Prompt build** — `prompt::build_user_message(masked_event, history)`. Brain verdict fields (`authorized`, `intent_category`, `reasoning`, `signal`, `persona_drift_score`, `injection_detected`, `malicious_code_detected`, `compromised_package_detected`, plus `policy_decision.{allow, reasons, review}`) are *stripped*. Independent reasoning is the entire value proposition — feeding brain's verdict in turns deep-review into a confirmation engine that structurally cannot find what Haiku missed.
+7. **Provider call** — `provider.review(&prompt)` wrapped in `with_backoff` (1s / 4s / 16s exponential backoff + full jitter, 60s total wall-clock budget per event).
+8. **Compute `brain_delta`** — server-side, from the (`brain_authorized`, `deep_verdict`) pair:
+
+   ```
+   (brain_authorized=true,  deep=Green)  → Agreed
+   (brain_authorized=true,  deep=Yellow) → Escalated
+   (brain_authorized=true,  deep=Red)    → Escalated
+   (brain_authorized=false, deep=Green)  → Downgraded
+   (brain_authorized=false, deep=Yellow) → Downgraded
+   (brain_authorized=false, deep=Red)    → Agreed
+   ```
+
+9. **Emit** — publish `deep_review_finding` row to `warden.forensic`. If `verdict == Red && confidence ≥ page_confidence`: `alert_sink.maybe_page(...)` fires the configured Slack-shape webhook (rate-limited).
+10. **Soft-fail on retry exhaust** — emit `deep_review_failed { reason }` where reason ∈ `timeout` / `vendor_5xx` / `parse_error` / `quota_exceeded` / `rate_limited` / `unknown_vendor_error`. Consumer advances.
+
+History capacity defaults: last 20 events by `agent_id`, capped at 50 by `correlation_id` per the roadmap. Both knobs are env-tunable.
+
+### 4. Wire surface
+
+**Inbound:** the same `LogRequest` JSON envelope every other forensic-row publisher emits. No new schema. `LogRequest.method` and `LogRequest.policy_decision` are the only fields deep-review reads beyond identity/correlation.
+
+**Outbound:** three new `method` values on the same `LogRequest` envelope, distinguished by their JSON payload shape inside `policy_decision`:
+
+| `method` | `policy_decision` payload shape |
+|---|---|
+| `deep_review_finding` | `{verdict, confidence, reasoning, brain_delta, reviewing_model, review_latency_ms, reviewed_at, original_method, original_correlation_id}` |
+| `deep_review_failed` | `{reason, reviewing_model, original_method, original_correlation_id}` |
+| `deep_review_skipped` | `{reason, original_method, original_correlation_id}` |
+
+- `verdict` ∈ `"Green" | "Yellow" | "Red"`.
+- `brain_delta` ∈ `"Agreed" | "Escalated" | "Downgraded"`.
+- `reason` (failed) ∈ `"Timeout" | "Vendor5xx" | "ParseError" | "QuotaExceeded" | "RateLimited" | "UnknownVendorError"`.
+- `reason` (skipped) is a free-form string; v1 only emits `"budget"`.
+
+The ledger needs no code change. Chain v3's `HashableEntryV3` is event-kind-polymorphic via `payload_sha256` — adding new `method` values is mechanical. Operators see the new rows in the existing audit table; the dedicated `/deep-review` console route is deferred (see §8).
+
+### 5. Sampling, budgeting, retries, concurrency
+
+All knobs are env-driven. Defaults in parens.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `WARDEN_DEEP_REVIEW_SAMPLE_RATE_GREEN` | `0.01` | Fraction of brain-Green events reviewed |
+| `WARDEN_DEEP_REVIEW_SAMPLE_RATE_FLAGGED` | `1.0` | Fraction of brain-Yellow/Red events reviewed |
+| `WARDEN_DEEP_REVIEW_CONCURRENCY` | `4` | Max concurrent in-flight reviews (tokio semaphore) |
+| `WARDEN_DEEP_REVIEW_DAILY_TOKEN_CAP` | `1_000_000` | Input + output tokens per UTC day (~$60/day Opus). Demo VPS pins `200_000` |
+| `WARDEN_DEEP_REVIEW_RETRY_BUDGET_SECS` | `60` | Per-event wall-clock budget across retries |
+| `WARDEN_DEEP_REVIEW_PAGE_CONFIDENCE` | `0.85` | Confidence floor for paging on Red |
+| `WARDEN_DEEP_REVIEW_ALERT_WEBHOOK` | (none) | Slack-shape webhook URL; disabled when unset |
+| `WARDEN_DEEP_REVIEW_HISTORY_PER_AGENT` | `20` | Per-agent history ring-buffer capacity |
+| `WARDEN_DEEP_REVIEW_HISTORY_PER_CORRELATION` | `50` | Per-correlation history cap |
+| `WARDEN_DEEP_REVIEW_METRICS_PORT` | `8087` | Prometheus `/metrics` port. Sibling `identity` owns `8086` |
+| `WARDEN_DEEP_REVIEW_ANTHROPIC_API_KEY` | `mock-key` | API key; sentinel `mock-key` selects `MockProvider` |
+
+Retry algorithm: full-jitter exponential backoff at `1s / 4s / 16s`. Each delay is sampled uniformly from `[0, base]` per the AWS Architecture Blog full-jitter prescription. Total wall-clock is enforced via `retry_budget` even if individual sleeps complete fast — a slow vendor call that returns one second before the budget expires is not retried.
+
+Budget tracker resets at UTC midnight via day-ordinal comparison (cheap; no tokio interval). `try_reserve` is the gate before any vendor call; `record_actual` reconciles the estimate with the response's `usage` field on success.
+
+Paging is rate-limited per agent: `AlertRateLimiter` is a token bucket keyed by `agent_id`, refill 1 / minute. Over-limit pages are dropped silently — the finding still lands in the ledger, so the alert can be reconstructed.
+
+### 6. Failure-mode posture
+
+- **Vendor 5xx / timeout / parse error.** Retry 3× per the backoff schedule. On exhaust: emit `deep_review_failed` and advance the NATS consumer. Never blocks the audit stream.
+- **Vendor 429.** Same retry path; mapped to `RateLimited` reason on exhaust.
+- **Daily budget exceeded.** Emit `deep_review_skipped { reason: "budget" }` and advance. Counter resets at UTC midnight.
+- **Sampling skip.** No sentinel emitted. `_skipped` events would dominate the ledger and obscure real coverage gaps; sampling decisions are recoverable from the brain's full event stream.
+- **Alert rate-limit.** Page dropped silently; finding still landed.
+- **Self-emission loop.** Filtered at the consumer entry by `method` prefix.
+- **NATS publish failure on emit.** Logged at `warn`, the event is dropped (best-effort posture). A persistent NATS outage will surface in the brain → ledger path long before it affects deep-review, since brain has the same dependency on the same subject.
+
+Three sentinel types (`finding` / `failed` / `skipped`) make every coverage gap queryable from the ledger.
+
+### 7. PII handling
+
+`warden-deep-review/src/pii.rs` is an in-tree regex masker. Patterns: SSN, email, IPv4, credit-card (Luhn-shape 13-19 digit), PEM blocks, AWS access keys. Sentinels: `[SSN]`, `[EMAIL]`, `[IPV4]`, `[CC]`, `[PEM]`, `[AWS_KEY]`. The masker is idempotent — masking twice produces the same string — verified by the compliance harness on every benchmark case.
+
+Mask is applied to every string leaf in the event JSON *before* the prompt builder strips brain-verdict fields. Defense in depth: even fields that get stripped never reach the vendor API in raw form.
+
+The masker is deliberately small. A future v1.x+1 task is to swap it for the more capable `warden-brain/src/pii.rs` masker (which has bigram embedding + regex). Two masker implementations is documented technical debt; the rationale for *not* path-dep'ing brain's masker at MVP is avoiding ~30 transitive deps and a BrainState coupling for a 60-line regex job.
+
+### 8. Operator surface
+
+**Today (shipped):**
+
+- Findings appear as normal rows in `/audit` with `method` ∈ `deep_review_*`.
+- `/verify` walks the chain over the new rows transparently (no ledger code change).
+- Prometheus `/metrics` exposes per-verdict and per-failure-reason counters on the configured port.
+- Slack-shape page on Red + confidence ≥ floor when `WARDEN_DEEP_REVIEW_ALERT_WEBHOOK` is set.
+
+**Deferred (callout — see roadmap §"v1.x — in flight"):**
+
+- `/deep-review` console route: paginated list (50/page), columns timestamp · correlation (short hash) · agent · model · brain → deep verdict · confidence · latency. Filters: date range, verdict, brain_delta.
+- `/narrative` summary strip: last-7d findings count, brain_delta donut, top disagreement category.
+- Click-through from a finding into the unified request timeline so brain verdict + deep-review finding + any HIL events are visible in chain order.
+- Helm chart values under `warden-charts/` for K8s sidecar deployments.
+
+### 9. Test surface
+
+Hermetic test coverage at MVP:
+
+- 57 unit tests across alert, budget, config, consumer, finding, history, pii, prompt, providers (mock + Opus wiremock), retry, review, sampler.
+- 8 integration tests in `tests/compliance.rs` driving the full benchmark corpus through the prompt builder + PII mask + `MockProvider`.
+- 25-case seed benchmark in `benchmark/cases.json` covering `slow_exfiltration` (4) / `persona_drift` (4) / `indirect_injection` (4) / `recon_probing` (6) / `benign_workflow` (5) / `mixed` (2). Each case is a (`history`, `event`, `expected_verdict`, `min_confidence`) tuple.
+- System-prompt invariants: ≥14,500 chars (Opus prompt-cache ephemeral-prefix floor) and all four named blind-spot topics present, asserted via unit test.
+
+Producing a published baseline accuracy number against real Opus (parallel to brain's 86.67%) requires an operator-run pass — out of CI by design (token cost, network dependence).
+
+### 10. Confirmed before writing code
+
+The architectural decisions resolved by `/grill-me`:
+
+1. Async post-hoc execution mode, NATS consumer on the same `warden.forensic` subject (not on the hot path, not a separate JetStream stream at v1 to match existing infra).
+2. Sampling: 100% flagged + configurable Green floor (not full traffic, not flagged-only — Green sampling is the blind-spot mitigator).
+3. Single provider per deployment behind an `LlmProvider` trait (not ensemble, not sequential escalation — both deferred pending benchmark data).
+4. Reuse `LogRequest` envelope with three new `method` values (not a new wire envelope, not a parallel chain).
+5. Brain verdict stripped from prompt; `brain_delta` computed server-side (not "feed brain's verdict in for the model to react to" — that's a confirmation engine).
+6. Per-event soft-fail with three sentinel types (not at-least-once durable redelivery, not best-effort silent drop).
+7. In-tree regex PII masker at MVP (not path-dep on brain's masker — deferred swap with documented rationale).
+8. Page on Red + high-confidence only, rate-limited per agent; no auto-block (async detection + auto-block is a self-DoS waiting to happen).
+
+---
+
 ## Threat model
 
 
@@ -1955,6 +2149,66 @@ JSON-RPC body. The hashable explicitly excludes `signal` and `source`.
 Append throughput is SQLite-bounded. NATS subscriber is single-threaded
 by design (chain order matters). Operator runbook covers backlog
 diagnosis.
+
+### warden-deep-review
+
+Async forensic auditor. Subscribes to the same `warden.forensic`
+subject the ledger consumes from; emits findings via three new
+`method` values on the existing `LogRequest` envelope. See
+[Forensic-tier deep review](#forensic-tier-deep-review) for the
+feature spec.
+
+#### Spoofing & Tampering
+
+Deep-review reads from NATS and posts to Anthropic. There is no
+inbound HTTP request surface — its only published port is the
+Prometheus `/metrics` endpoint.
+
+→ **Same deferred service-mesh action item as brain / policy / hil:**
+add SPIFFE mTLS to the NATS link so an attacker who lands on the
+overlay network cannot publish forged forensic rows that deep-review
+would dutifully feed into a paid vendor call.
+
+#### Repudiation
+
+Findings are anchored in the chain by the ledger's standard append
+path — same audit trail as any other forensic row. `brain_delta` and
+`reviewing_model` are part of the canonical hash; an after-the-fact
+edit of which model said what is detectable on chain `verify`.
+
+#### Information disclosure
+
+Deep-review calls **Anthropic Claude Opus 4.7** by default. Sensitive
+payloads transit the Anthropic API. Same explicit trust dependency as
+brain's Haiku 4.5 call; the same "Zero-Knowledge Bonus" invariant
+applies (Opus is separate from any agent's primary LLM).
+
+PII regex masking runs before the vendor call (see §7 of
+[Forensic-tier deep review](#forensic-tier-deep-review)). The
+mock-mode path (`WARDEN_DEEP_REVIEW_ANTHROPIC_API_KEY=mock-key`)
+bypasses the vendor entirely and is used by e2e + CI.
+
+#### Denial of service
+
+- **Vendor outage cannot stall the audit stream.** Retry budget +
+  soft-fail + `deep_review_failed` sentinel make each per-event
+  failure recoverable; the consumer keeps advancing.
+- **Token bomb.** A pathological attacker who can publish to
+  `warden.forensic` could try to drive deep-review into a budget
+  exhaustion that hides their own subsequent events from review.
+  Daily token cap defends against catastrophic spend; `_skipped`
+  sentinels make the coverage gap auditable. The real defense is
+  still the NATS perimeter (same as every other forensic publisher).
+- **Alert storm.** Per-agent token bucket (1 page / minute) prevents
+  Red-finding amplification from a single misbehaving agent.
+
+#### Elevation of privilege
+
+Deep-review issues **no inline blocking actions** — no proxy-side
+veto, no auto-quarantine via identity, no pre-emptive HIL injection.
+A compromised deep-review can only forge `deep_review_*` rows; the
+brain → proxy → policy → ledger pipeline is unaffected by its
+verdicts. Defense-in-depth.
 
 ### warden-hil
 
