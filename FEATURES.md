@@ -260,6 +260,51 @@ WARDEN_TEST_POSTGRES_URL="postgres://postgres:test@127.0.0.1:5432/postgres" \
 # test sqlite_and_postgres_produce_identical_chain ... ok
 ```
 
+### 1.12 Observe-only mode (`WARDEN_MODE=observe`)
+
+**Concept.** New deployments don't want enforcement to bite on day one — false positives during the tuning window stall agents and burn operator trust. Observe mode flips every deny / review verdict to allow at the proxy boundary while still emitting the forensic event, including a `would_deny` / `would_park` annotation. Operators tune policy against real traffic for a week, then promote to `enforce`. The default is `enforce` so a misconfigured environment fails closed.
+
+**Implementation.** `warden-proxy` reads `WARDEN_MODE={enforce|observe}` (default `enforce`); `warden-lite` exposes the same toggle under `WARDEN_LITE_MODE`. In observe mode the verdict-to-status mapping in `forward_or_block` short-circuits to `Authorized`, but the forensic event carries the original `verdict` and an `observe_mode` flag so downstream audit and webhooks can distinguish "would-have-blocked" from "allowed". The `warden_proxy_would_deny_total` / `warden_proxy_would_park_total` Prometheus counters surface the gap between current policy posture and an enforcement-on world.
+
+**Verify.**
+
+```bash
+WARDEN_MODE=observe ./repos/warden-e2e/dev/run.sh
+# trigger any scenario that would normally deny
+curl http://localhost:9001/metrics | grep warden_proxy_would_deny_total
+# counter increments; agent received 200
+```
+
+### 1.13 Rate limiting + quotas (proxy ingress)
+
+**Concept.** Before Brain / Policy run, the proxy enforces a token bucket per `agent_id` and per `tenant` (SVID URI `tenant/<t>`). Burst spikes from a runaway agent get bounced with `429 Too Many Requests` before they touch the security pipeline; tenant-wide quotas put a ceiling on shared-noisy-neighbor cost. Forensic events tag the throttle (`signal=rate_limited_{agent,tenant}`) so audit lists exactly which scope tripped. Opt-in: default 0 leaves the limiter `None` and the fast path skips the gate entirely.
+
+**Implementation.** Token-bucket gate in `warden-proxy::handle_mcp`, runs before `handle_mcp_inner`'s Brain/Policy pipeline. Per-agent and per-tenant buckets keyed on the parsed `MtlsIdentity`. Knobs: `WARDEN_PROXY_RATE_LIMIT_PER_AGENT_QPS` / `WARDEN_PROXY_RATE_LIMIT_PER_TENANT_QPS`. 429 body is a structured JSON `{error, scope, key, retry_after_secs, correlation_id}`. New counter `warden_proxy_rate_limit_denied_total{scope}`. `warden-lite` ships the per-agent half (no SVID tenant to derive from); 429 body shape identical minus `scope`.
+
+**Verify.**
+
+```bash
+WARDEN_PROXY_RATE_LIMIT_PER_AGENT_QPS=2 ./repos/warden-e2e/dev/run.sh
+# burst more than 2 RPS from a single client cert
+for _ in $(seq 1 10); do curl -sk --cert client.crt --key client.key https://localhost:8443/mcp -d '{}' & done
+# Some return 200, some 429 with retry_after_secs body
+```
+
+### 1.14 Policy starter pack (7 Rego templates)
+
+**Concept.** A fresh policy engine without rules denies nothing — but writing seven Rego files cold is a non-trivial first day. The starter pack ships ready-made templates for the common ground-truth bad cases: PII egress, prod-DB writes, money moves, agent impersonation, prompt-injection indicators, off-hours actions, rate-limit review. Each adds rules to `warden.authz`'s deny / review sets; `governance.rego` keeps the `allow if` gate. Operators copy what they want, drop them in `policies/templates/`, and either tune in-place or use the `wardenctl generate-policy` command (§6.6) to scaffold against the sibling repo.
+
+**Implementation.** `repos/warden-policy-engine/policies/templates/`. Seven files: `pii_egress.rego`, `prod_db_writes.rego`, `money_moves.rego`, `agent_impersonation.rego`, `prompt_injection.rego`, `off_hours_actions.rego`, `rate_limit_review.rego`. Each declares packages under `warden.authz.{templates,deny,review}` so they compose with `governance.rego`'s entry point without conflict. Test coverage at `tests/policy_templates.rs` — 17 integration tests probing each template against trigger inputs and safe-baseline inputs.
+
+**Verify.**
+
+```bash
+ls repos/warden-policy-engine/policies/templates/
+# pii_egress.rego  prod_db_writes.rego  money_moves.rego ...
+cargo test --manifest-path repos/warden-policy-engine/Cargo.toml policy_templates
+# 17 passed
+```
+
 ---
 
 ## 2. HIL — human-in-the-loop
@@ -307,6 +352,31 @@ In the console `/hil/{id}` page, the sandbox report renders above the raw payloa
 ```bash
 curl "http://localhost:8083/audit/correlation/<correlation_id>" | jq
 ```
+
+### 2.4 Async callback flow (`X-Warden-Callback-URL`)
+
+**Concept.** The default Yellow-tier flow is synchronous — the proxy long-polls HIL and the agent's request hangs until decide / expiry. Async callback inverts the dependency: the agent supplies a callback URL on `/mcp`, the proxy returns `202 Accepted` immediately with the correlation ID, and on operator decide HIL POSTs the resolution to the agent's callback. Frees the agent to do other work while the human decides — important for long-tail review windows that exceed sensible HTTP timeouts. Callback targets are gated against an explicit allowlist so a compromised agent can't redirect resolutions to an attacker.
+
+**Implementation.** `warden-lite` ships the OSS surface today; full-stack `warden-proxy + warden-hil` push variant is the next layer. Agent supplies `X-Warden-Callback-URL: <url>` on `/mcp`; on operator decide warden-lite POSTs `{correlation_id, decision, decider_note, decided_at}` fire-and-forget. URLs must match a prefix in `WARDEN_LITE_CALLBACK_ALLOWLIST`; unset rejects callbacks entirely (partners fall back to polling). Failures log at `warn` and never delay the operator response.
+
+**Verify.**
+
+```bash
+WARDEN_LITE_CALLBACK_ALLOWLIST=https://my-agent.example.com/ \
+  warden-lite serve &
+# Agent makes a request and supplies the callback URL
+curl ... -H "X-Warden-Callback-URL: https://my-agent.example.com/decide" ...
+# Returns 202 Accepted with correlation_id. After approve via /pending/{id}/decide,
+# warden-lite POSTs to the agent's callback.
+```
+
+### 2.5 Mobile-responsive approver flow
+
+**Concept.** Approvers are not at their desk when production wakes them. The console's HIL queue needs to be operable on a phone: 44pt tap targets, swipeable nav, no horizontal scroll on 375px viewports. Slack notifications carry an "Open in console" deep-link so the approver lands directly on the right pending without hunting through the queue.
+
+**Implementation.** `warden-console/templates/hil*.html` + `static/styles.css` enforce mobile-first widths; the Approve / Deny / Modify buttons are sized for thumb input and the queue uses a swipeable carousel pattern (CSS scroll-snap, no JS library). `warden-hil` reads `WARDEN_CONSOLE_URL`; when set, the Slack pending card embeds an "Open in console" button targeting `${WARDEN_CONSOLE_URL}/hil/${pending_id}` so a Slack-on-phone approval flow lands one tap from the queue.
+
+**Verify.** Open `http://localhost:8085/hil` on a phone-shaped viewport (Chrome devtools → Pixel 7). Buttons hit-test cleanly with no zoom required. With `WARDEN_CONSOLE_URL` set, post a Yellow-tier from the simulator and check the Slack message — the deep-link button is present.
 
 ---
 
@@ -650,6 +720,32 @@ open http://localhost:8085/policies
 
 End-to-end coverage in `./repos/warden-e2e/dev/run-policies.sh` (see §11.7).
 
+### 4.11 Cost + latency dashboard (`/stats/cost-latency`)
+
+**Concept.** Operators need one page that answers "is the security pipeline meeting its latency SLA, and what is it costing us per agent?" The dashboard scrapes `/metrics` from every warden service, parses Prometheus text format with a lenient hand-rolled scraper (no Pushgateway dependency), and surfaces per-service / per-endpoint p50 / p99 / request counts / error rates in one table. Cost is operator-driven: set per-tool prices and the dashboard multiplies ledger row counts over a rolling 24h window. Empty cost table renders an in-page "ingest not configured" explainer rather than blank.
+
+**Implementation.** `warden-console` `/stats/cost-latency` route. Env vars: `WARDEN_CONSOLE_METRICS_URLS` (comma list of `{name}={url}` pairs; sensible localhost defaults), `WARDEN_CONSOLE_TOOL_COSTS=tool:$/call,…`. Pure-Rust Prometheus scraper at `warden-console/src/metrics_scrape.rs` — no `prometheus-parse` dependency (its strictness rejects our `# HELP` formatting in places). Cost rollup queries `warden-ledger`'s `/audit` for the 24h window per configured tool.
+
+**Verify.**
+
+```bash
+WARDEN_CONSOLE_TOOL_COSTS="stripe.refund:0.02,search.web:0.001" \
+  cargo run --bin warden-console
+open http://localhost:8085/stats/cost-latency
+```
+
+### 4.12 Audit narrative view (`/audit/agents/{id}/narrative`)
+
+**Concept.** The `/audit` page renders rows. Sometimes you want the story instead — "Everything `support-bot-3` did this week" as a paragraph plus a sparkline plus a top-intent breakdown. The narrative view aggregates the agent's recent ledger window into a `Narrative` shape: headline sentence, hourly/daily sparkline, top intent categories with percentages, top tools by call count, distinct deny reasons with sample reasoning, HIL summary (pending/approved/denied/expired/unreachable), signal annotations, and a notable-events timeline that filters routine traffic out. Same demo-prefix gating as `/audit` and HIL `/decide` so a visitor only narrates their own synthetic agent.
+
+**Implementation.** `warden-console` `/audit/agents/{agent_id}/narrative` route + `narrative.rs` module. Window selector: 1d / 7d (default) / 30d / 90d (hard cap). Bucket granularity auto-picks hourly for 1d, daily for longer. `/audit` page gains a "Story view →" header link surfaced only when exactly one literal agent is in the filter — hidden for wildcards and the all-agents view so the link never misleads about scope. 14 lib tests covering window parsing, empty-state, outside-window drops, headline pluralisation, top-N sort, HIL category mapping, deny-vs-review separation, signal aggregation, notable-events ordering, and bucket-granularity selection.
+
+**Verify.**
+
+```bash
+open http://localhost:8085/audit/agents/support-bot-3/narrative?window=7d
+```
+
 ---
 
 ## 5. Operator authentication
@@ -776,6 +872,22 @@ curl -X POST http://localhost:8084/pending/<id>/decide \
 
 **Verify.** Inspect cookie attributes after login; reload after 8 hours and observe re-prompt.
 
+### 5.10 SAML SP (feature-gated)
+
+**Concept.** OIDC covers the bulk of modern enterprise SSO (Okta, Azure AD, Google Workspace, OneLogin all speak it), but SAML-only IdPs — older Shibboleth, ADFS, some Ping Federate installs — still exist in regulated industries. The console ships a SAML SP behind the `saml` cargo feature so deployments needing it can build with SAML wired in, while default builds keep the static-cargo posture (samael pulls libxml2 + libxmlsec1 via FFI). The role-resolution layer reuses the same OIDC group-map (§5.5) — the SAML half is purely about the bind protocol.
+
+**Implementation.** `warden-console` `AuthMode::Saml(SamlConfig)` arm. Consumes IdP metadata at boot (URL or inline XML); verifies XML-DSig assertions via `samael`'s xmlsec backend; extracts NameID + group attribute with Okta / Azure AD / Google Workspace / OneLogin attribute names recognized. Browser flow: `GET /auth/saml/login` (HTTP-Redirect AuthnRequest) → `POST /auth/saml/acs` (HTTP-POST signed SAMLResponse). Audit chain stamps `decided_by = saml:<NameID>`. RBAC hardening alongside: every gate deny bumps `warden_console_role_denials_total{required,actual}` so SREs can alarm on suspicious access attempts. Builds via `--build-arg WARDEN_CARGO_FEATURES=saml` against the Dockerfile, which conditionally installs the matching system libs. 110 lib tests pass on both feature configs; clippy `-D warnings` clean both ways.
+
+**Verify.**
+
+```bash
+WARDEN_CARGO_FEATURES=saml cargo build --features saml --bin warden-console
+WARDEN_AUTH_MODE=saml \
+  WARDEN_SAML_METADATA_URL=https://idp.example.com/metadata \
+  cargo run --features saml --bin warden-console
+open http://localhost:8085/auth/saml/login
+```
+
 ---
 
 ## 6. `wardenctl` CLI
@@ -855,6 +967,21 @@ tar -tzf bundle.tar.gz
 ```bash
 wardenctl agents get nonexistent || echo "exit: $?"      # 4
 wardenctl agents get <id> --bad-flag || echo "exit: $?"  # 2
+```
+
+### 6.6 First-run ergonomics (`init` / `doctor` / `generate-policy`)
+
+**Concept.** Make `wardenctl` the front door for new operators, not a thin client over `warden-sdk`. Three verbs collapse the typical first-day questions: `init` scaffolds `~/.config/warden/config.toml` (and optionally a `policies/templates/` starter dir); `doctor` probes `/health` on every configured service URL and reports up/down/latency in one go (skips proxy by default — the mTLS gate would register as a false-negative); `generate-policy` lists or emits the 7 starter templates from §1.14 to disk, embedded via `include_str!` against the sibling repo so the CLI is self-contained.
+
+**Implementation.** `warden-ctl` Cargo workspace. `init` writes `config.toml` with `--with-policies` opt-in for the starter dir. `doctor` accepts a comma-list override via `--services`; defaults to console / hil / identity / policy-engine / ledger. `generate-policy {list|<name>}` ships the seven templates from §1.14 baked into the binary so the CLI works without a checked-out sibling repo. 35 unit + integration tests pass; clippy `-D warnings` clean.
+
+**Verify.**
+
+```bash
+wardenctl init --with-policies                  # config + starter templates land
+wardenctl doctor                                # latency table
+wardenctl generate-policy list                  # 7 names
+wardenctl generate-policy pii_egress > pii.rego # template to stdout
 ```
 
 ---
@@ -1025,6 +1152,36 @@ curl http://localhost:8083/audit?source=simulator | jq '.[].correlation_id' | so
 open 'http://localhost:8085/audit?signal=peer_bundle_stale:other-tenant'
 ```
 
+### 8.5 Outbound verdict webhooks (warden-lite)
+
+**Concept.** Operators want every terminal pipeline outcome (allow / deny / park, plus `would_deny` / `would_park` in observe mode) and every HIL decision (`decide_allow` / `decide_deny`) pushed to their SIEM in real time — no scrape lag, no polling. The webhook ships one stable-shape JSON event per outcome to a configured URL. Distinct from the human-facing Slack webhook (which posts Markdown); this one is for ingest pipelines (Datadog HTTP source, Splunk HEC, Loki, Vector, in-house).
+
+**Implementation.** `warden-lite` reads `WARDEN_LITE_WEBHOOK_URL`. Payload: `{event, correlation_id, agent_id, tool_type, method, intent_category, reasoning, review_reasons, mode, ts}` with RFC 3339 ms-precision UTC. 5s per-request timeout; failures log at `warn` and never delay the agent or operator response. 4 integration tests cover allow / deny / park-then-decide / observe-mode `would_deny` emission against a stub sink. Full-stack `warden-proxy` mirror is a follow-up.
+
+**Verify.**
+
+```bash
+# Stub sink
+nc -lk 4444 &
+WARDEN_LITE_WEBHOOK_URL=http://localhost:4444/ warden-lite serve &
+# Drive any agent → see one JSON event per outcome on the sink
+```
+
+### 8.6 Streaming audit egress (ledger → SIEM)
+
+**Concept.** The full-stack ledger's counterpart to §8.5. Where the cold-tier export (§9) writes one Parquet snapshot per day for archive, the egress sweeper streams every chain row to a SIEM within seconds. Per-sink cursors keep the streams independent of cold export and of each other: mid-batch crashes advance only past entries the sink confirmed, and the next sweep retries from the first failed row. Stable wire envelope across all three sinks carries the chain row's UUID so downstream dedup is straightforward.
+
+**Implementation.** `warden-ledger/src/egress.rs`. `StreamSink` trait + three impls: `SplunkHecSink` (`POST /services/collector` with `Authorization: Splunk <token>`), `DatadogLogsSink` (`POST http-intake.logs.<site>/api/v2/logs` with `DD-API-KEY`), `GenericHttpSink` (JSON POST + optional bearer; covers Loki / Vector / Logstash / in-house). Per-sink cursors in `egress_cursors` SQLite table. Env vars: `WARDEN_LEDGER_EGRESS_INTERVAL_SECS` (default 30; 0 disables), `WARDEN_LEDGER_EGRESS_BATCH_SIZE` (default 100), plus per-sink URL/token. SQLite-only — Postgres mode (§1.11) ingests directly against the chain table.
+
+**Verify.**
+
+```bash
+WARDEN_LEDGER_EGRESS_SPLUNK_URL=https://splunk.example.com:8088 \
+  WARDEN_LEDGER_EGRESS_SPLUNK_TOKEN=$TOKEN \
+  cargo run --bin warden-ledger
+# Drive some traffic, then check Splunk for warden events
+```
+
 ---
 
 ## 9. Cold-tier analytics exports
@@ -1071,13 +1228,21 @@ warden-shadow-scanner --local-fs ~/code --output findings.csv
 
 **Concept.** OSS single-binary edition for evaluators who want to try Warden without standing up the full six-service stack. Heuristic Brain (no Anthropic dep) + rego policy + hash-chain ledger + proxy in one binary. The chain format and policy input shape are wire-compatible with the full edition, so a customer can graduate from lite to full without re-instrumenting their agents.
 
-**Implementation.** `repos/warden-lite/`. Single-binary crate; subset of the full feature set. No HIL, no identity, no NATS — all in-process.
+**Implementation.** `repos/warden-lite/`. Single-binary crate; subset of the full feature set. No HIL, no identity, no NATS — all in-process. Operator-facing surface:
+
+- **Multi-agent registry.** `WARDEN_LITE_AGENTS=agent-a:tok-a,agent-b:tok-b` registers N agents behind one binary; the matched token determines `agent_id` on the ledger and as `input.agent_id` in Rego, so policies can scope tool access per agent. Mutually exclusive with the legacy single-token `WARDEN_LITE_TOKEN`.
+- **Online backup + restore.** `warden-lite backup --output FILE` takes an online snapshot via SQLite's `sqlite3_backup_*` API (safe against a running proxy); `warden-lite restore --input FILE [--force]` verifies the snapshot's chain BEFORE touching the target, then atomic-renames the sibling tmp into place so a partial write can't corrupt. Schema migrations on `Ledger::open` run idempotently, making the version-to-version upgrade path implicit.
+- **Outbound webhook.** `WARDEN_LITE_WEBHOOK_URL` — see §8.5.
+- **Async callback URL.** `X-Warden-Callback-URL` on `/mcp` + `WARDEN_LITE_CALLBACK_ALLOWLIST` — see §2.4.
+- **Observe-only mode.** `WARDEN_LITE_MODE=observe` — see §1.12.
 
 **Verify.**
 
 ```bash
-cargo run -p warden-lite -- --listen 127.0.0.1:8443
-# Drive an MCP call, observe ledger row in lite's local SQLite
+WARDEN_LITE_AGENTS=alice:tok-a,bob:tok-b warden-lite serve &
+# Per-agent ledger rows
+warden-lite backup --output /tmp/lite-backup.db
+warden-lite restore --input /tmp/lite-backup.db --force
 ```
 
 ### 10.3 `warden-sdk`
@@ -1104,6 +1269,72 @@ warden-sdk = "0.x.y"
 ```bash
 cargo run -p warden-sandbox-cli -- --method tools/call --params '{"name":"shell","args":{"command":"rm -rf /etc"}}'
 # Output: classification=Delete, severity=high, summary="rm -rf /etc/..."
+```
+
+### 10.5 TypeScript SDK (`warden-ai-sdk`)
+
+**Concept.** Wrap-the-client adapter for `@anthropic-ai/sdk` and `openai` so dropping warden into a Node agent is a two-line change. Streaming + parallel `tool_use` + retries with jittered exponential backoff + observe-mode safety (warden being down can't break the agent — observe falls through to allow + logs). `onPolicyError` callback hooks let the app distinguish "warden was unreachable" from "warden actively denied" without re-implementing the verdict shape.
+
+**Implementation.** `repos/warden-ai-sdk/` — TypeScript, published as `warden-ai-sdk` on npm. `wardenWrap(client, opts)` returns a wrapped client; the wrapper intercepts `messages.create` (Anthropic) and `chat.completions.create` (OpenAI), inspects each `tool_use` block via warden, and either allows / denies / parks. `WardenDenied`, `WardenPending`, `WardenTransportError` exception classes mirror the wire verdicts. `bearer-token` auth at the `warden-lite` ingress (mTLS still available for the full stack). Tests: TypeScript strict mode + tsc clean.
+
+**Verify.**
+
+```bash
+cd repos/warden-ai-sdk && npm test
+```
+
+### 10.6 Python SDK (`warden-ai`)
+
+**Concept.** Mirror of §10.5 for the Python ecosystem — wraps `AsyncAnthropic` / `AsyncOpenAI` plus the sync `Anthropic` / `OpenAI` clients. 1:1 parity with the TS SDK plus a synchronous flavour because not every Python agent codebase is asyncio.
+
+**Implementation.** `repos/warden-ai-py/`, published as `warden-ai` on PyPI. Streaming (both providers, async + sync); retries with jittered exponential backoff; parallel `tool_use` observability via `asyncio.gather`; `WardenPending.resolve()` end-to-end. `WardenDenied` / `WardenPending` / `WardenTransportError` exception hierarchy matches TS. 43 unit tests; `ruff` + `mypy --strict` clean.
+
+**Verify.**
+
+```bash
+cd repos/warden-ai-py && pip install -e . && pytest
+```
+
+### 10.7 Framework recipes + Computer Use + Realtime adapters
+
+**Concept.** Working repos under `examples/` for the integrations evaluators actually ask about: native Anthropic, native OpenAI, LangChain (TS + Python), Vercel AI SDK, Mastra, LlamaIndex. Plus two adapter recipes for newer surfaces — Anthropic Computer Use (the agent that drives a GUI) and OpenAI Realtime (the WS pump pattern). Each recipe is one `run.{ts,py}` + a README pointing at the load-bearing line. The top-level `examples/README.md` indexes them and lays out the wrap-the-client vs wrap-the-dispatcher integration spectrum.
+
+**Implementation.** Spread across both SDK repos:
+
+- `warden-ai-sdk/examples/` — `native-anthropic/`, `native-openai/`, `vercel-ai/`, `mastra/`, `langchain-js/`, `openai-realtime/`, `anthropic-computer-use/`. Realtime ships `inspectRealtimeFunctionCall` / `isRealtimeFunctionCallDone` / `normalizeRealtimeFunctionCall` helpers for the WS pump pattern; Computer Use tool_use blocks already flow through `wardenWrap` unchanged, so its recipe is wiring + a starter Rego snippet.
+- `warden-ai-py/examples/` — `langchain_recipe.py`, `llamaindex_recipe.py`, `computer_use_recipe.py`, `openai_realtime_recipe.py`. Python helpers under `warden_ai.realtime`. Uses the canonical `inspect_tool_use(NormalizedToolCall, opts)` signature end-to-end including the `WardenPending.resolve()` raise-on-deny contract.
+
+All recipes pass their respective type checkers (TS strict mode, mypy strict). 98 + 61 tests respectively across the two SDKs.
+
+**Verify.**
+
+```bash
+cd repos/warden-ai-sdk/examples/native-anthropic && npm install && npm start
+cd repos/warden-ai-py/examples && python langchain_recipe.py
+```
+
+### 10.8 One-click deploy (Fly.io)
+
+**Concept.** Make the first run a single click. The `warden-lite` repo ships a `fly.toml` + Dockerfile sized for Fly.io's free tier and a "Deploy to Fly" button in the README; clicking it runs `fly launch` against the upstream `ghcr.io/vanteguardlabs/warden-lite` multi-arch image and the new instance lands on a public hostname in ~60 seconds. The image defaults to `enforce` rather than `observe` because a misconfigured deploy must fail closed; entry-point docs walk operators through flipping to observe for the tuning window.
+
+**Implementation.** `repos/warden-lite/fly.toml` + multi-stage Dockerfile (rust:1-bookworm builder → debian:bookworm-slim runtime). Multi-arch (`linux/amd64,linux/arm64`) image push to ghcr.io on tag. README's `[![Deploy](https://fly.io/static/images/launch/deploy.svg)](https://fly.io/launch?...)` button points at the public image + a Fly launch template. CI gate: `smoke-e2e` runs an end-to-end `/mcp` happy path against the built image so a busted Dockerfile fails the release.
+
+**Verify.**
+
+```bash
+cd repos/warden-lite && fly launch --image ghcr.io/vanteguardlabs/warden-lite:latest
+```
+
+### 10.9 Unified docs site (`/docs/`)
+
+**Concept.** Until v0.5.0, evaluators had to read per-repo READMEs + the spec to learn warden. The unified docs site collapses that into a single portal with the four entry points operators actually need: a 5-minute quickstart, a concepts overview, an API reference, and a recipe cookbook. Vanilla HTML/CSS — no framework, no build step — so the site survives any future Node rev and the page weight stays under 50 KB per route.
+
+**Implementation.** `repos/warden-website/docs/`. Five HTML pages: `index.html` (landing — 4 cards), `quickstart.html` (zero-to-verdict in 5 minutes), `concepts.html` (the four-layer model + three security signals + HIL tiers + observe-vs-enforce + the hash-chained ledger), `api.html` (every wire contract summarised, cross-referenced to `warden-specs/TECH_SPEC.md`), `recipes.html` (12 cookbook patterns: TS SDK, Python SDK, LangChain, Vercel AI, Anthropic Computer Use, OpenAI Realtime, Slack HIL deep-link, SAML/SSO setup, Postgres ledger, Helm sidecar deploy, observe-mode rollout, Splunk/Datadog egress). Shares `styles.css` with the marketing pages — same primitives (`.section`, `.spec-toc`, `.spec-steps`, `.codeblock`, `.spec-verdict-grid`); small additive `.docs-subnav` / `.docs-cards` / `.docs-continue` primitives keep the docs nav consistent. Top-nav "Docs" link backfilled across all marketing pages so the 9-page site has one consistent navigation surface.
+
+**Verify.**
+
+```bash
+open https://warden.vanteguardlabs.com/docs/
 ```
 
 ---
@@ -1229,6 +1460,46 @@ docker compose -f repos/warden-e2e/prod/docker-compose.yml --profile stack up -d
 ./repos/warden-e2e/dev/run-stack-e2e.sh
 ```
 
+### 11.9 Cert-free local dev mode (`WARDEN_DEV_CERTS=1`)
+
+**Concept.** Onboarding's #1 first-run gotcha used to be `./scripts/gen_certs.sh` — without certs the proxy panics at startup. Cert-free dev mode flips this for host-cargo runs: the proxy auto-mints an ephemeral CA + server + client triplet into `WARDEN_CERT_DIR` on first boot. Opt-in by env var (never auto-enabled) so a misconfigured prod deploy can't self-issue a CA root, and the script never overwrites existing PEMs.
+
+**Implementation.** `warden-proxy/src/tls.rs`. When `WARDEN_DEV_CERTS=1`, the boot path uses `rcgen` to mint a self-signed CA + server cert (CN=`localhost`) + client cert (CN=`agent-001`) into `${WARDEN_CERT_DIR:-./certs}`. Subsequent boots reuse what's there. Container / production runs still go through `scripts/gen_certs.sh --env {prod,dev}` so the certs dir is operator-controlled. `warden-e2e/dev/deploy.sh` and `warden-e2e/prod/deploy.sh` ship a guard that runs `gen_certs.sh` automatically when the bind-mount source is empty — protects against the recurring "certs dir got wiped" failure mode.
+
+**Verify.**
+
+```bash
+WARDEN_DEV_CERTS=1 cargo run --bin warden-proxy
+# certs/ now contains ca.crt, server.crt, client.crt (all ephemeral)
+```
+
+### 11.10 Perf + chaos harness in CI
+
+**Concept.** Nightly + weekly regression gates that catch a Brain regression, a policy slowdown, or a chaos-suite drift before a release. Chaos boots the full dev compose stack and runs `run-stack-e2e.sh` (happy path + the chaos-monkey catalog from §11.5). Perf boots with the velocity tracker disabled (the in-process tracker's 100 req/60s/agent circuit-breaker pins any meaningful load run), fires a benign ping for a fixed window, and emits a JSON report with p50 / p95 / p99 / throughput / errors. The reference baseline is checked in; a regression that moves p99 by >20% fails the run.
+
+**Implementation.** `warden-chaos-monkey/src/bin/warden-perf-harness.rs` is a sister binary that reuses the chaos runner's mTLS plumbing (shared `mtls.rs` for cert loading + `reqwest::Client` build). New `--exclude-category` flag on the chaos runner so CI can drop the brain-touching `injection` family if no Anthropic key is wired. `warden-policy-engine` gains a third `WARDEN_VELOCITY_BACKEND=disabled` arm for perf measurement only (production keeps `inprocess` or `nats-kv`). Workflows at `warden-e2e/.github/workflows/`: `chaos.yml` (nightly + dispatch — boots dev compose, runs run-stack-e2e.sh), `perf.yml` (weekly + dispatch — boots with velocity disabled, fires harness 60s @ 30 concurrency, uploads `perf-report.json` artifact). First reference snapshot at `warden-e2e/perf/reference.json`: 1381 rps, p50 21.0 ms, p95 31.7 ms, p99 38.7 ms over 82880 requests, 0 errors.
+
+**Verify.**
+
+```bash
+./repos/warden-chaos-monkey/target/release/warden-perf-harness \
+  --proxy https://localhost:8443/mcp --duration 60 --concurrency 30
+# Emits perf-report.json
+```
+
+### 11.11 Brain accuracy benchmark (`warden-brain-bench`)
+
+**Concept.** Lakera, Prompt Security, Robust Intelligence — each publishes accuracy numbers on a private eval set. Hard to compare without a shared methodology. The Brain benchmark publishes both: a vendored eval suite (66 cases × 7 categories × 5 personas) and a sister binary that scores each case (TP / TN / FP / FN, precision / recall / F1, percentile latency) against the live `/inspect` router in-process. The published baseline is the floor; a CI gate fails any PR that regresses the deterministic-keyword subset. A transparent loss with reproducible methodology beats unverified closed-source claims.
+
+**Implementation.** `warden-brain/src/bin/warden-brain-bench.rs` reuses the Router as a library and scores `benchmark/cases.json`. Personas: `support`, `finance`, `devops`, `code-review`, `marketing`. Categories: 7 (PII egress, prompt injection, persona drift stretch, etc.). First baseline at `benchmark/baseline.json`: deterministic-keyword subset 100% (54/54), overall 81.82% (54/66, precision 1.000 / recall 0.732 / F1 0.845). The 12 missed cases are the persona-drift-stretch category — cross-persona attacks with no keyword trigger that need live Voyage embeddings + Haiku classifier to catch; their absence in mock mode is the published "live Brain delta" rather than hidden. CI gate: `tests/compliance.rs` + the bench binary's `--deterministic-floor 1.0` flag fail any PR that regresses the keyword-supported subset. Methodology: `BENCHMARK.md` covers categories, scoring rule (positive = deny), reproduction commands for both mock and live mode, known limitations, and the promote-a-fresh-baseline workflow.
+
+**Verify.**
+
+```bash
+cargo run -p warden-brain --bin warden-brain-bench -- --baseline benchmark/baseline.json
+# Mock-mode scoreboard with deterministic floor enforced
+```
+
 ---
 
 ## 12. Supply chain & threat model
@@ -1295,6 +1566,22 @@ open repos/warden-specs/TECH_SPEC.md     # navigate to # threat-model
 
 ```bash
 grep -r "async-nats" repos/*/Cargo.toml
+```
+
+### 12.6 Cross-service consistency (health / readyz / metrics / logs)
+
+**Concept.** Every shipping service exposes the same three observability endpoints under the same wire shape: `/health` for liveness, `/readyz` for readiness, `/metrics` for Prometheus scrape. Metric naming is uniform: `warden_<kebab-to-snake-service-slug>_*`. Logs switch to single-line JSON on the same env knob across services. Lets a single Helm probe template, a single Prometheus scrape config, and a single log-aggregator parser handle every service.
+
+**Implementation.** All 8 services (proxy, brain, policy-engine, ledger, hil, identity, console, warden-lite) hit the same `/health` + `/readyz` + `/metrics` trio with the same JSON shape on `/readyz` (`ReadinessResponse { status, checks: BTreeMap }`). Metric prefixes uniformly use `warden_<service>_*` — the policy-engine rename `warden_policy_*` → `warden_policy_engine_*` aligns the last outlier. `WARDEN_LOG_FORMAT=json` is honored by every service for structured-event output. Refinement deferred: only `warden-proxy` currently threads `correlation_id` as a structured `tracing::span` field; the other services emit it via `tracing::info!("… correlation_id={}")` which lands in the JSON `message` field but isn't a top-level structured key. Migrating every handler to `tracing::info!(correlation_id = %x, …)` is per-handler work, not gating consistency.
+
+**Verify.**
+
+```bash
+for s in warden-proxy:9001 warden-brain:9002 warden-policy-engine:9003 \
+         warden-ledger:8083 warden-hil:8084 warden-identity:8086 \
+         warden-console:8085 warden-lite:8443; do
+    curl -fsS "http://localhost:${s##*:}/readyz" | jq .status
+done
 ```
 
 ---
