@@ -250,7 +250,7 @@ The §11.3 valuation claim (⭐⭐⭐⭐⭐, "zero-trust score" metric) and the 
 
 - **`warden-e2e`** gains: SVID issuance happy path; revocation kills next request within 1s; signed-row chain verification against a regulator-style export.
 - **`warden-chaos-monkey`** gains: `stolen_svid_replay`, `unattested_binary`, `expired_grant`, `cross_tenant_unfederated`. All four must produce specific, predicted verdicts.
-- **`warden-simulator`** gains a `--delegation-mix` flag so persona-driven traffic spans multiple human principals — needed to make the console demo look real.
+- **`warden-simulator`** has a `--delegation-mix` flag (env `SIM_DELEGATION_MIX`) — comma-separated pool of human `act.sub` values; each fire picks one at random and stamps an unsigned `X-Warden-Grant` header. The proxy's v1 grant parser is signature-advisory (`warden-proxy/src/grant.rs`), so the unsigned grant is accepted and the console audit page renders the "Delegation: <human> via <agent>" badge with realistic variety. *Shipped 2026-05-13 (v0.6.5).*
 
 ### 11. What this spec deliberately does not include
 

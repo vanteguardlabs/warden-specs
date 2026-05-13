@@ -1685,13 +1685,13 @@ curl -X POST -H "Authorization: Bearer <admin-jwt>" \
 # missing admin cap → 403 missing_capability:agents:admin
 ```
 
-### 14.2 `--delegation-mix` simulator flag (test fidelity)
+### 14.2 ~~`--delegation-mix` simulator flag~~ (shipped 2026-05-13 in v0.6.5)
 
-**Concept.** `TECH_SPEC.md#identity-service` §10 says the simulator should gain a `--delegation-mix` flag so persona-driven traffic spans multiple human principals — needed for console demo authenticity (the audit page's "Delegation: alice@acme via support-bot-3" badge).
+`warden-simulator/src/delegation.rs` holds the pool parser + per-fire grant-crafting helper. CLI flag `--delegation-mix` (env `SIM_DELEGATION_MIX`) takes a comma-separated list of human-principal `act.sub` values. Each request fire picks one uniformly at random and crafts an unsigned `X-Warden-Grant` JWT carrying `{iss, jti, act.sub, exp, iat}` claims. The proxy parses the payload without signature verification (`warden-proxy/src/grant.rs` v1 trust model — grants are advisory metadata for the HIL pending row) and stamps `act.sub` onto the audit row. Empty pool is rejected at boot. Unset = no header attached (legacy CN-only audit shape preserved).
 
-**Status.** Not implemented in `warden-simulator/src/cli.rs`.
+**Compose:** `SIM_DELEGATION_MIX=alice@acme.com,bob@acme.com,carol@globex.com,dana@globex.com` wired into both `warden-e2e/prod/docker-compose.yml` and `dev/docker-compose.yml`.
 
-**Workaround.** Drive multi-principal traffic manually via direct `wardenctl agents create` + per-agent SVID issuance.
+**Verify.** Check the console `/audit` page: the "Delegation" column now shows variety across the four principals. Or grep ledger rows for `delegation_jti` LIKE `sim-%`.
 
 ### 14.3 ~~Demo experience~~ (shipped — `demo.session_minted` closed 2026-05-13)
 
