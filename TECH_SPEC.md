@@ -112,7 +112,7 @@ Standalone Rust service, port 8086. It is the only component allowed to mint SVI
 | `POST` | `/grant` | Exchange OIDC `id_token` + agent SVID → delegation grant | OIDC `id_token` + SVID mTLS |
 | `POST` | `/actor-token` | Mint an audience-bound A→B token | Caller SVID + grant |
 | `POST` | `/sign` | Warden-side signing of a finalized verdict (§5) | Proxy SVID only |
-| `POST` | `/revoke` | Revoke an instance or grant | Operator WebAuthn |
+| `POST` | `/revoke` | Revoke an instance SVID or a delegation grant (`{"kind":"svid","svid_id":...}` / `{"kind":"grant","jti":...}`, optional `reason`). Sets `revoked_at` + emits `svid.revoked` / `grant.revoked` chain v3 event. | Admin capability (`agents:admin`) — spec previously named "Operator WebAuthn" but identity terminates on OIDC + caps; admin is the cap-equivalent kill switch (matches `decommission`). |
 | `GET`  | `/jwks.json` | Public keys for grant/actor-token verification | Public |
 | `GET`  | `/.well-known/spiffe-bundle` | SPIFFE federation bundle | Public |
 
@@ -1116,7 +1116,7 @@ Existing WebAuthn rows in the chain don't get the field retroactively; only rows
 The trust path is **mode-dependent** because WebAuthn already has a stronger primitive and we don't tear it out:
 
 - **WebAuthn mode (today, unchanged):** HIL is the credential authority. The console proxies WebAuthn ceremonies and shuttles HIL's session cookie back to the browser; subsequent `/decide` calls attach the HIL cookie and HIL stamps `decided_by` from the verified principal.
-- **OIDC / basic-admin / disabled:** HIL has no credential to verify, so console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console verifies OIDC (or basic-admin), stamps `decided_by`, and presents the bearer on `/decide`. HIL trusts the request-body `decided_by` *only when* a valid bearer is present; without the bearer, the existing `Authn::Disabled` fallback applies. **Console refuses to boot if the configured mode requires the token and it is missing**; HIL validates per-request and 401s a token-less decide (boot-time validation on HIL is queued as v1.x+1 polish so a misconfigured deploy fails on first decide instead of on next process start).
+- **OIDC / basic-admin / disabled:** HIL has no credential to verify, so console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console verifies OIDC (or basic-admin), stamps `decided_by`, and presents the bearer on `/decide`. HIL trusts the request-body `decided_by` *only when* a valid bearer is present; without the bearer, the existing `Authn::Disabled` fallback applies. Console refuses to boot if the configured mode requires the token and it is missing; HIL defaults to per-request validation (401 on a token-less decide) but operators can opt into the same boot-time guard by setting `WARDEN_HIL_REQUIRE_DECIDE_TOKEN=true` — HIL then refuses to start unless `WARDEN_HIL_DECIDE_TOKEN` is also set. The opt-in keeps backward compatibility while letting bearer-only deployments fail loudly on first start.
 
 The bearer is the interim posture for the non-WebAuthn modes; internal s2s mTLS via warden-identity SVIDs (deferred service-mesh work, see "Threat model — Open items") will replace it uniformly across all modes including WebAuthn.
 
@@ -1397,7 +1397,7 @@ POST /mint
   5. 303 → `https://console-demo.vanteguardlabs.com/#token=<jwt>`
 ```
 
-The mint event is currently *not* logged to the ledger; emitting `event_kind: demo.session_minted` on every mint is queued as roadmap entry B3 ("audit-trail completeness for demo lifecycle"). Today's audit-trail captures the visitor's actions starting from the *first* request through the proxy (which carries the spliced correlation ID); session-creation itself is invisible to the chain.
+Every successful mint emits a `demo.session_minted` chain v1 forensic event to `warden.forensic` with `agent_id = "demo-mint"`, `correlation_id = <prefix>-mint`, and the pseudonymous `sub` carried in `signal`. The ledger appends the row alongside proxy/policy events so the audit chain has a record of when each demo session was created. `WARDEN_DEMO_MINT_NATS_URL` toggles it (unset → the mint still serves; the chain just doesn't get a session-creation row).
 
 #### 5.2 Scope enforcement
 
@@ -1484,7 +1484,7 @@ Watch-out that held: **never deploy the console with auth disabled on a non-loop
 
 Still open after ship:
 
-- **`demo.session_minted` chain row.** Mint event isn't currently appended to the ledger; tracked as roadmap entry B3 ("audit-trail completeness for demo lifecycle").
+- (Resolved 2026-05-13) ~~`demo.session_minted` chain row~~ — `warden-demo-mint` now publishes a chain v1 `demo.session_minted` event to `warden.forensic` on every successful mint. Toggled via `WARDEN_DEMO_MINT_NATS_URL`.
 
 ### 10. Confirmed before writing code (historical record)
 
