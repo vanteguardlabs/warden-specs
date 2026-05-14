@@ -1954,7 +1954,7 @@ policy / hil / identity`, `deep-review ↔ NATS`). Captures the
 substrate decision so the wire contract is pre-agreed when the
 implementation lands.
 
-**Module status:** **designed 2026-05-14**, **implementation
+**Module status:** **designed 2026-05-14; open questions resolved 2026-05-14** (see §10), **implementation
 deferred** to v1.x+2 (roadmap item B7). Today every internal hop is
 plain HTTP over the deployment perimeter — proxy, console, and
 deep-review trust the docker network or k8s `NetworkPolicy` for
@@ -2160,24 +2160,51 @@ The dynamic SVID workload-cert refresh path (option A's full form)
 is **v1.x+3** — a follow-up that swaps bootstrap-cert reads for
 SVID fetches once every service speaks mTLS.
 
-### 10. Open questions (call before session 2)
+### 10. Decided 2026-05-14
 
-1. **Bootstrap cert lifetime.** 1 year (default) vs. 90 days. Longer
-   = less rotation pain; shorter = better blast-radius posture.
-   Default lean: **1 year**, document rotation under the existing
-   issuer-key runbook.
-2. **Server-side SPIFFE check on the client side.** Today the client
-   verifies server cert via DNS-host match against the Service name.
-   A stronger posture verifies the server cert's SAN URI matches an
-   expected SPIFFE URI (e.g. `spiffe://warden.local/service/brain`).
-   Stronger but adds code to every outbound caller. Default lean:
-   **defer to v1.x+3** alongside the SVID refresh work.
-3. **NATS TLS — separate or same cycle.** Doing both at once is more
-   work but avoids leaving a hole. Default lean: **separate, B7.5**.
-4. **Health-probe port posture.** Kubelet probes the plain-HTTP
-   health listener; that listener stays plain in v1.x+2 (probes have
-   no caller cert). Default lean: **plain HTTP on the health port,
-   mTLS on the application port** — same as the proxy already does.
+The four originally-open questions are answered below — session 2
+proceeds against these.
+
+1. **Bootstrap cert lifetime: 1 year.** Aligns with the existing
+   issuer-key rotation runbook ([Runbooks §7](#runbooks)) so
+   operators are not asked to maintain two rotation cadences. The
+   bootstrap cert is the *fallback* credential in the full option-A
+   model — once v1.x+3 ships workload-SVID refresh, the
+   typically-in-use credential becomes a short-lived SVID with Vault
+   Transit rotation, and the bootstrap cert is only exercised at pod
+   restart. Operators who want a tighter posture can rerun
+   `gen_certs.sh` semi-annually and rolling-restart; no spec change
+   required. Documented in the v1.x+2 cert-pair rotation runbook
+   (session 6 deliverable).
+2. **Server-side SPIFFE check on the client side: deferred to
+   v1.x+3.** Today's DNS-host match against the k8s Service name
+   protects against everything short of warden-CA compromise. The
+   stronger SAN-URI check would only differentiate "valid cert under
+   the wrong identity" from "valid cert under the right identity",
+   and an attacker who can mis-issue under the warden CA can also
+   forge any SPIFFE URI they like — the marginal protection is small
+   for the code cost across every outbound caller. Bundling this
+   with the v1.x+3 SVID refresh work is cheaper because the same
+   `warden-sdk` mTLS helper gains both behaviors in one change.
+3. **NATS TLS: separate cycle (B7.5).** Application certs close the
+   larger of the two holes — they protect the signing oracle
+   (`proxy → identity /sign`) and verdict integrity
+   (`proxy → brain /inspect`). Forged forensic events on a hijacked
+   NATS link land in the hash-chained ledger visibly (the proxy
+   signature on emission would not validate from a NATS-only
+   forger), so the NATS link is *detection-favorable* even
+   un-encrypted. Splitting keeps slice scope contained.
+4. **Health-probe port posture: plain HTTP on health port, mTLS on
+   the application port.** Kubelet probes carry no client cert, and
+   the proxy already runs this pattern (mTLS-only on `:8443`, plain
+   HTTP on `:8080` for the kubelet `/health` + `/readyz`). All v1.x+2
+   backend services adopt the same shape: existing application port
+   gains mTLS; a separate plain-HTTP `health` containerPort serves
+   only `/health` + `/readyz` and is not published by the k8s
+   Service (kubelet probes the containerPort directly). The chart
+   already supports this via the per-service `healthPort` knob in
+   `values.yaml`; in v1.x+2 the knob is added to every backend, not
+   just proxy.
 
 ---
 

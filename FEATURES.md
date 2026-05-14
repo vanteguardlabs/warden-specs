@@ -1769,6 +1769,17 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.13 v0.7.2 ship log (2026-05-14)
+
+Locks in the four originally-open questions from v0.7.1's §"Internal service mTLS" §10 so session 2 of the implementation slice has a fixed target.
+
+- **Q1 bootstrap cert lifetime → 1 year.** Aligns with the existing issuer-key rotation runbook so operators maintain one rotation cadence, not two. Once v1.x+3 ships workload-SVID refresh, the bootstrap cert becomes a fallback exercised only at pod restart — annual rotation of a fallback credential is adequate. Operators wanting tighter posture rerun `gen_certs.sh` semi-annually with no spec change.
+- **Q2 server-side SPIFFE check → deferred to v1.x+3.** DNS-host match against the k8s Service name protects against everything short of warden-CA compromise; an attacker with the CA key can also forge SPIFFE URIs, so the stronger SAN-URI check has small marginal value for the code cost across every outbound caller. Folds into the v1.x+3 SVID refresh work where the same `warden-sdk` helper gains both behaviors in one change.
+- **Q3 NATS TLS → separate B7.5 cycle.** Application certs close the bigger hole (signing oracle + verdict integrity); forged forensic events land in the hash-chained ledger visibly because the proxy signature on emission would not validate from a NATS-only forger. NATS link is detection-favorable even un-encrypted. Splitting keeps slice scope contained.
+- **Q4 health-probe port → plain HTTP on `healthPort`, mTLS on application port.** Same pattern proxy already uses (mTLS-only on `:8443`, plain HTTP on `:8080` for kubelet probes). All v1.x+2 backend services adopt this shape; the helm chart's per-service `healthPort` knob (already present for proxy in v0.7.0) extends to every backend in v1.x+2.
+
+§10 of the spec section retitled from "Open questions" to "Decided 2026-05-14" with each answer's reasoning inlined. The §"Module status" header keeps the v1.x+2 deferral — only the design is locked, the implementation slice is not started.
+
 ### 14.12 v0.7.1 ship log (2026-05-14)
 
 Design-record entry — no implementation code. Captures the agreed substrate for internal service-to-service mTLS (roadmap B7) so the wire contract is pre-agreed when the implementation lands across the next six sessions.
