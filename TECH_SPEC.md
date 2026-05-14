@@ -1954,7 +1954,7 @@ policy / hil / identity`, `deep-review ↔ NATS`). Captures the
 substrate decision so the wire contract is pre-agreed when the
 implementation lands.
 
-**Module status:** **designed 2026-05-14; open questions resolved 2026-05-14** (see §10); **session 2 shipped 2026-05-14** (`gen_certs.sh` workload certs + chart `tlsBundle` projection + identity allowlist extension — substrate provisioned, no service consumes the new certs yet); **sessions 3-6 queued** (roadmap item B7). Today every internal hop is
+**Module status:** **designed 2026-05-14; open questions resolved 2026-05-14** (see §10); **session 2 shipped 2026-05-14** (substrate provisioned: `gen_certs.sh` per-service certs + chart `tlsBundle` projection + identity allowlist extension); **session 3 shipped 2026-05-14** (brain pilot: `warden-brain` binds rustls + SPIFFE allowlist on `/inspect`; `warden-proxy` presents `service-proxy.{crt,key}` on the brain hop; verified end-to-end in dev with 3-way allowlist tests); **sessions 4-6 queued** (roadmap item B7). Today every internal hop *except proxy→brain* is
 plain HTTP over the deployment perimeter — proxy, console, and
 deep-review trust the docker network or k8s `NetworkPolicy` for
 caller authenticity. A compromised pod on the overlay can speak
@@ -2152,7 +2152,7 @@ Six sessions, paced to keep blast radius small:
 |---|---|---|---|
 | 1 | **This section** — pre-agree the wire shape. No code. | `warden-specs/TECH_SPEC.md` (this section), `warden-specs/FEATURES.md` §14.12 | **Shipped** v0.7.1 |
 | 2 | Extend `gen_certs.sh` to mint per-service bootstrap certs. Helm chart `proxyTls.secretName` → `tlsBundle.secretName` with per-pod `items:` projection. Identity allowlist gains `spiffe://warden.local/service/`. | `warden-proxy/scripts/gen_certs.sh`, `warden-charts/`, `warden-e2e/{prod,dev}/docker-compose.yml` | **Shipped** v0.7.3 |
-| 3 | **Brain pilot** — `axum-server` + `rustls` TLS receive path on the application port; SPIFFE SAN allowlist verifier. Proxy gains client-cert outbound on `/inspect`. Plain-HTTP health port preserved for kubelet (Q4 decision). | `warden-brain`, `warden-proxy` | Queued |
+| 3 | **Brain pilot** — `axum-server` + `rustls` TLS receive path on the application port; SPIFFE SAN allowlist verifier. Proxy gains client-cert outbound on `/inspect`. Plain-HTTP health port preserved for kubelet (Q4 decision). | `warden-brain`, `warden-proxy` | **Shipped** v0.8.0 |
 | 4 | Same pattern for policy-engine + hil + ledger + deep-review (ledger fetch only — NATS stays plain at this stage). | `warden-policy-engine`, `warden-hil`, `warden-ledger`, `warden-deep-review`, `warden-proxy`, `warden-console` | Queued |
 | 5 | Console-side outbound mTLS for ledger / hil / policy / identity. Identity-receive-path SVID validation. | `warden-console`, `warden-identity` | Queued |
 | 6 | E2E verify (`warden-e2e/run-stack-e2e.sh` extended), threat-model section trim, runbook for cert-pair rotation, spec lock. | `warden-e2e/`, `warden-specs/TECH_SPEC.md` | Queued |

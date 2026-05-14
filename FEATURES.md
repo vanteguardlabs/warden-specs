@@ -1769,6 +1769,24 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.15 v0.8.0 ship log (2026-05-14)
+
+B7 session 3 — brain pilot. The proxy→brain hop is now mTLS-gated end-to-end with SPIFFE-URI caller identity. First service-pair to consume the substrate provisioned in v0.7.3.
+
+- **`warden-brain` mTLS receive.** `WARDEN_BRAIN_TLS_DIR=/certs` flips brain from plain HTTP to `axum-server` + `rustls` on `:8081`. Loads `ca.crt` + `service-brain.{crt,key}`; `WebPkiClientVerifier` validates the chain. New `auth::SpiffeAcceptor` (mirrors `warden-proxy/src/mtls.rs::MtlsAcceptor`) pulls the verified peer cert's SAN URI into a `CallerIdentity` request extension. `auth::require_allowed_caller` middleware reads it back and 401s `untrusted_caller` (`no_spiffe_uri` or `uri_not_allowlisted`) unless the caller's URI prefix-matches `WARDEN_BRAIN_ALLOWED_CALLERS`. Empty allowlist with TLS on → boot panic.
+- **Split listeners.** `/inspect` lives on the TLS port; `/health` + `/readyz` + `/metrics` move to `WARDEN_BRAIN_HEALTH_ADDR` (default `0.0.0.0:9081`) so kubelet probes and Prometheus scrapes don't need client certs. Q4 decision realized: plain-HTTP health port + mTLS application port.
+- **`create_app_split`** added alongside `create_app`. Returns `(/inspect, /health+/readyz)` as separate routers so main.rs can bind them to different ports without breaking the existing `create_app` test surface.
+- **`warden-proxy` outbound mTLS.** `LayerClient::new` gains an `Option<OutboundTls>` arg; when all three of `WARDEN_PROXY_OUTBOUND_{CERT,KEY,CA}_PATH` are set, the inner `reqwest::Client` is built with `use_rustls_tls()` + `Identity::from_pem(cert+key concat)` + `add_root_certificate(ca)`. Partial-set logs warn and falls back to plain HTTP (clear signal vs. silent miscompile). `reqwest/rustls-tls` feature added — matches the existing rustls on the receive side, no native-tls pull-in.
+- **Helm chart 0.4.0.** `warden.backendEnvs` helper now auto-injects:
+  - Proxy: `WARDEN_BRAIN_URL` flips `http://` → `https://` when `tlsBundle.secretName` is set; `WARDEN_PROXY_OUTBOUND_{CERT,KEY,CA}_PATH` populated from `tlsBundle.mountPath/service-proxy.{crt,key}` + `ca.crt`.
+  - Brain: `WARDEN_BRAIN_TLS_DIR` + `WARDEN_BRAIN_ALLOWED_CALLERS=spiffe://warden.local/service/proxy` + `WARDEN_BRAIN_HEALTH_ADDR=0.0.0.0:9081`.
+  - `services.brain.healthPort: 9081` added to values.yaml so the chart's probe helper aims kubelet at the right port under TLS mode.
+- **Compose flipped** in both `warden-e2e/{prod,dev}` — brain mounts certs read-only and gets the three TLS env vars; proxy gets the outbound cert paths and `WARDEN_BRAIN_URL=https://`.
+- **Verified** end-to-end in dev: proxy mTLS-handshakes against brain, simulator drives 17/18 OK + 1 expected SECURITY BLOCK, p50=158ms. 3-way curl test confirms (i) no-cert → TLS `certificate required` alert; (ii) legacy CN-only cert → 401 `no_spiffe_uri`; (iii) brain's own service-brain cert (wrong SAN) → 401 `uri_not_allowlisted`; (iv) service-proxy cert → 422 on bad body (allowlist-passing).
+- **Cargo deps** — brain gains `rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }`, `tokio-rustls`, `rustls-pemfile`, `axum-server`, `x509-parser`. Proxy gains `reqwest/rustls-tls`.
+
+Sessions 4-6 queued: extend the same pattern to policy-engine + hil + ledger + deep-review (session 4), console outbound + identity SVID validation (session 5), e2e verify + runbook (session 6).
+
 ### 14.14 v0.7.3 ship log (2026-05-14)
 
 B7 session 2 — substrate provisioning for internal service mTLS. The new bootstrap certs are minted and mountable but no service consumes them yet; sessions 3-6 bring services online against the substrate.
