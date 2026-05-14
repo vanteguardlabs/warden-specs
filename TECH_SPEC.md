@@ -1954,8 +1954,7 @@ policy / hil / identity`, `deep-review ↔ NATS`). Captures the
 substrate decision so the wire contract is pre-agreed when the
 implementation lands.
 
-**Module status:** **designed 2026-05-14; open questions resolved 2026-05-14** (see §10), **implementation
-deferred** to v1.x+2 (roadmap item B7). Today every internal hop is
+**Module status:** **designed 2026-05-14; open questions resolved 2026-05-14** (see §10); **session 2 shipped 2026-05-14** (`gen_certs.sh` workload certs + chart `tlsBundle` projection + identity allowlist extension — substrate provisioned, no service consumes the new certs yet); **sessions 3-6 queued** (roadmap item B7). Today every internal hop is
 plain HTTP over the deployment perimeter — proxy, console, and
 deep-review trust the docker network or k8s `NetworkPolicy` for
 caller authenticity. A compromised pod on the overlay can speak
@@ -2103,23 +2102,25 @@ Transit rotation for free.
 
 ### 7. Helm chart wiring
 
-The umbrella chart at `warden-charts/charts/warden/` (v0.2.0)
-already supports `proxyTls.secretName` — a single k8s Secret carrying
-the proxy + identity cert bundle. v1.x+2 evolves this to
-`tlsBundle.secretName` carrying every service's cert pair:
+The umbrella chart's `tlsBundle.secretName` value (shipped 2026-05-14
+in chart `0.3.0` / `appVersion 0.7.3` as session 2 of this slice)
+carries a single k8s Secret with:
 
 ```
-ca.pem
-service.<name>.pem
-service.<name>.key
-client.<name>.pem
-client.<name>.key
+ca.crt
+server.crt + server.key       (proxy agent-facing mTLS, CN=localhost)
+client.crt + client.key       (legacy starter-agent client, CN=agent-001)
+service-<name>.crt + .key     (per-workload SPIFFE identity, SAN URI
+                              spiffe://warden.local/service/<name>,
+                              one pair per service)
 ```
 
 The chart mounts the Secret read-only at `${WARDEN_<SVC>_TLS_DIR}`
-on each Deployment, projecting only the keys relevant to that
-service (k8s Secret `items:` projection — server pod gets server +
-CA, never another service's private key).
+on each Deployment via k8s Secret `items:` projection so each pod
+sees only `ca.crt` plus its own `service-<name>.{crt,key}`. The
+proxy additionally mounts `server.{crt,key}` (agent-facing mTLS)
+and `client.{crt,key}` (legacy starter-agent client). A compromised
+brain pod cannot read hil's private key.
 
 NetworkPolicy (`networkPolicy.enabled=true`) becomes
 **belt-and-braces** rather than the sole perimeter: a defense-in-depth
@@ -2147,14 +2148,14 @@ of the cryptographic mTLS check.
 
 Six sessions, paced to keep blast radius small:
 
-| # | Scope | Touches |
-|---|---|---|
-| 1 | **This section** — pre-agree the wire shape. No code. | `warden-specs/TECH_SPEC.md` (this section), `warden-specs/FEATURES.md` §14.x |
-| 2 | Extend `gen_certs.sh` to mint per-service bootstrap certs. Helm chart `proxyTls.secretName` → `tlsBundle.secretName`. Compose bind-mounts updated. Identity gains `service:*` SPIFFE prefix allowance. | `warden-proxy/scripts/gen_certs.sh`, `warden-charts/`, `warden-e2e/{prod,dev}/docker-compose.yml`, `warden-identity` |
-| 3 | **Brain pilot** — `axum-server` + `rustls` TLS receive path. SPIFFE SAN allowlist verifier. Proxy gains client-cert outbound on `/inspect`. | `warden-brain`, `warden-proxy` |
-| 4 | Same pattern for policy-engine + hil + ledger + deep-review (ledger fetch only — NATS stays plain at this stage). | `warden-policy-engine`, `warden-hil`, `warden-ledger`, `warden-deep-review`, `warden-proxy`, `warden-console` |
-| 5 | Console-side outbound mTLS for ledger / hil / policy / identity. Identity-receive-path SVID validation. | `warden-console`, `warden-identity` |
-| 6 | E2E verify (`warden-e2e/run-stack-e2e.sh` extended), threat-model section trim, runbook for cert-pair rotation, spec lock. | `warden-e2e/`, `warden-specs/TECH_SPEC.md` |
+| # | Scope | Touches | Status |
+|---|---|---|---|
+| 1 | **This section** — pre-agree the wire shape. No code. | `warden-specs/TECH_SPEC.md` (this section), `warden-specs/FEATURES.md` §14.12 | **Shipped** v0.7.1 |
+| 2 | Extend `gen_certs.sh` to mint per-service bootstrap certs. Helm chart `proxyTls.secretName` → `tlsBundle.secretName` with per-pod `items:` projection. Identity allowlist gains `spiffe://warden.local/service/`. | `warden-proxy/scripts/gen_certs.sh`, `warden-charts/`, `warden-e2e/{prod,dev}/docker-compose.yml` | **Shipped** v0.7.3 |
+| 3 | **Brain pilot** — `axum-server` + `rustls` TLS receive path on the application port; SPIFFE SAN allowlist verifier. Proxy gains client-cert outbound on `/inspect`. Plain-HTTP health port preserved for kubelet (Q4 decision). | `warden-brain`, `warden-proxy` | Queued |
+| 4 | Same pattern for policy-engine + hil + ledger + deep-review (ledger fetch only — NATS stays plain at this stage). | `warden-policy-engine`, `warden-hil`, `warden-ledger`, `warden-deep-review`, `warden-proxy`, `warden-console` | Queued |
+| 5 | Console-side outbound mTLS for ledger / hil / policy / identity. Identity-receive-path SVID validation. | `warden-console`, `warden-identity` | Queued |
+| 6 | E2E verify (`warden-e2e/run-stack-e2e.sh` extended), threat-model section trim, runbook for cert-pair rotation, spec lock. | `warden-e2e/`, `warden-specs/TECH_SPEC.md` | Queued |
 
 The dynamic SVID workload-cert refresh path (option A's full form)
 is **v1.x+3** — a follow-up that swaps bootstrap-cert reads for
