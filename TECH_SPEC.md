@@ -14,7 +14,8 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 - [Demo experience](#demo-experience) — public-facing demo design
 - [Console policy management](#console-policy-management) — read + CRUD + activate/deactivate of `*.rego` and `*.json` policies from the console
 - [Forensic-tier deep review](#forensic-tier-deep-review) — async heavy-LLM auditor running against a sampled slice of the audit stream
-- [Internal service mTLS](#internal-service-mtls) — agreed substrate for proxy↔backend hops (designed; implementation deferred to v1.x+2)
+- [Internal service mTLS](#internal-service-mtls) — agreed substrate for proxy↔backend hops (shipped v0.8.3 — application hops; v0.8.4 — NATS transport)
+- [Workload SVID refresh](#workload-svid-refresh) — short-lived per-service SVIDs minted on top of the bootstrap cert (designed; implementation v1.x+3)
 - [Threat model](#threat-model) — STRIDE-organized, layer-by-layer
 - [Runbooks](#runbooks) — five on-call failure modes
 
@@ -2214,6 +2215,384 @@ proceeds against these.
    already supports this via the per-service `healthPort` knob in
    `values.yaml`; in v1.x+2 the knob is added to every backend, not
    just proxy.
+
+---
+
+## Workload SVID refresh
+
+Companion to [Internal service mTLS](#internal-service-mtls). Where
+that section ships the **bootstrap layer** (1-year per-service cert
+pairs read once at boot, plus a server-side SPIFFE allowlist on every
+receive path), this section ships the **dynamic layer**: each service
+periodically exchanges its bootstrap cert for a short-lived workload
+SVID minted by `warden-identity`, presents the SVID on subsequent
+hops, and falls back to the bootstrap cert if refresh fails. The
+client side also gains the deferred server-identity check —
+validating the peer's SPIFFE SAN URI matches the expected
+`service/<name>` rather than just "any cert signed by the warden CA"
+(closes [§Internal service mTLS §10 Q2](#internal-service-mtls)).
+
+**Module status:** **designed 2026-05-14**; implementation is the
+v1.x+3 slice (sessions 2–5). The bootstrap layer alone is operational
+today — workload-SVID refresh layers on top without breaking
+existing callers (the fallback path is the bootstrap behavior).
+
+### 1. What this closes
+
+Three gaps left open by v1.x+2:
+
+| # | Gap (today) | Closure (v1.x+3) |
+|---|---|---|
+| G1 | A leaked bootstrap cert is valid for up to 1 year and there is no in-band rotation — the only revocation is `gen_certs.sh` + rolling restart, which requires operator action and a maintenance window. | Workload SVIDs are short-lived (≤1h TTL). A leaked SVID is valid for ≤1h after the rotation runbook flips the issuer key. The bootstrap cert moves from "primary credential" to "fallback exercised only at pod restart" — its 1-year lifetime is acceptable because it is no longer the typically-in-use credential. |
+| G2 | The receive-side allowlist (`WARDEN_<SVC>_ALLOWED_CALLERS`) validates *who* the caller claims to be, but the client side does not validate *who the server claims to be* beyond "DNS-host match + valid CA cert." A compromised brain pod could plant a brain-signed cert at the policy-engine DNS name and intercept proxy→policy calls. | Every outbound caller gains an `expected_server_spiffe` config equivalent to the receive-side allowlist. The reqwest client validates the server cert's SAN URI matches one entry in the expected list; mismatch = closed connection before any request body is sent. |
+| G3 | Rotation of an in-service issuer key (Vault Transit `rotate`) only takes effect for *agents* (they re-fetch SVIDs on every long-running session). Services hold the bootstrap cert until pod restart, so a Transit rotation does not propagate into the s2s trust path until the operator rolls every Deployment. | A workload-SVID refresh inherits Transit rotation for free — the next refresh after a rotation picks up the new issuer kid. Services rotate at TTL/2 cadence, so within ~30 min of an issuer rotation every s2s leg is using a freshly-minted SVID under the new key. |
+
+The closure is most-valuable for **G1** (revocation effectiveness),
+adequate for **G2** (defense-in-depth against CA-rooted attacks the
+existing posture already mitigates), and operationally significant
+for **G3** (no operator step needed to propagate a rotation).
+
+### 2. Hops in scope
+
+Every service that holds a bootstrap cert today (`gen_certs.sh`
+SERVICES list as of v0.8.4: `proxy`, `brain`, `policy-engine`,
+`ledger`, `hil`, `identity`, `console`, `deep-review`, `simulator`,
+`nats`, `demo-mint`) gains the refresh client. The receive side of
+the relationship is unchanged from v1.x+2 — the allowlist already
+accepts `service/<name>` SAN URIs, and short-lived SVIDs carry the
+same SAN URI as the bootstrap cert, so no receive-side code changes.
+
+`warden-identity` is the bootstrap target for the refresh call
+itself. Its receive path accepts either a bootstrap cert *or* a
+freshly-minted workload SVID, identically — the SAN-URI allowlist
+match is what gates `/workload-svid`. This avoids the chicken-and-egg
+where identity could not refresh itself.
+
+`nats` (the server, not the pubsub clients) is **out of scope** for
+SVID refresh: NATS does not currently support certificate hot-reload
+without dropping connections, and the 1-year bootstrap cert is the
+operationally acceptable trade-off for the server side. NATS *clients*
+(the seven NATS-pub/sub services from B7.5) reuse their workload SVID
+for the NATS handshake the same way they reuse it for HTTP hops.
+
+### 3. Wire shape
+
+New endpoint on `warden-identity`:
+
+```text
+POST /workload-svid
+Headers: (client cert presented at mTLS handshake — bootstrap cert or
+          live workload SVID, both accepted)
+Body: { "ttl_seconds": 1800 }    // optional, capped at MAX_TTL_SECONDS
+
+200 → {
+  "id":          "<uuidv7>",
+  "spiffe_id":   "spiffe://warden.local/service/<name>",
+  "cert_pem":    "...",
+  "key_pem":     "...",
+  "ca_cert_pem": "...",
+  "not_before":  "2026-05-14T13:00:00Z",
+  "not_after":   "2026-05-14T13:30:00Z"
+}
+
+400 → { "error": "ttl_seconds_too_large" }      // > MAX_TTL_SECONDS
+401 → { "error": "caller_spiffe_missing" }      // no client cert
+403 → { "error": "caller_not_allowed" }         // SAN not in allowlist
+503 → { "error": "ca_unavailable" }             // warden-identity boot incomplete
+```
+
+**The caller does not choose its own identity.** The issued SVID's
+SAN URI is copied verbatim from the verified client cert's SAN URI.
+Brain cannot ask for a `service/policy-engine` SVID — the only thing
+it can request is a fresh `service/brain` cert.
+
+The handler validates:
+
+1. The mTLS handshake produced a verified client cert chained to the
+   warden CA (failure → connection closed by rustls before the
+   handler runs).
+2. The cert's SAN URI matches one entry in
+   `WARDEN_IDENTITY_WORKLOAD_ALLOWED_CALLERS` (new env, defaults to
+   the existing `WARDEN_IDENTITY_SIGN_ALLOWED_CALLERS` value if
+   unset — they describe the same caller set).
+3. The requested `ttl_seconds` ≤ `MAX_TTL_SECONDS` (3600).
+
+On success the handler:
+
+1. Generates a fresh keypair (`ed25519-dalek` or `ring` depending on
+   warden-identity's CA backend).
+2. Mints a cert valid for `ttl_seconds` (default 1800), SAN URI =
+   caller's SAN URI, signed by the warden CA.
+3. Persists a `workload_svids` row (`id`, `spiffe_id`, `not_before`,
+   `not_after`, `caller_kind` ∈ {`bootstrap`, `workload`} —
+   distinguishes "first refresh after boot" from "background
+   refresh").
+4. Emits a `svid.workload_refreshed` chain v3 forensic event (see
+   §6).
+5. Returns the cert + key + CA + lifetime.
+
+The handler **does not** echo the requesting caller's key material;
+key generation happens inside warden-identity to keep the trust
+chain anchored on identity-controlled randomness.
+
+**Why a new endpoint, not extending `/svid`?** Two reasons. (i)
+`/svid` carries agent-attestation semantics (`tenant`, `agent_name`,
+`AttestationEvidence`) and SPIFFE path
+`spiffe://warden.local/tenant/<>/agent/<>/instance/<uuid>`. Reusing
+the handler would mean a polymorphic body that branches on a
+`kind: workload` discriminator and skips most of the validation —
+adds risk without saving meaningful code. (ii) `/svid` is unauth at
+the mTLS layer today (attestation evidence in the body is the auth);
+`/workload-svid` is mTLS-authed at the listener. Mixing the two
+authentication models on one handler is the kind of soft-spot a
+threat-model audit catches and that we'd rather not write.
+
+### 4. Refresh state machine (caller side)
+
+The refresh client runs as a `tokio::spawn`-ed background task per
+service. State per worker:
+
+```rust
+struct WorkloadIdentity {
+    bootstrap: Arc<CertPair>,           // loaded once at boot
+    current: ArcSwap<CertPair>,         // active credential (workload or bootstrap)
+    expected_server_spiffe: Vec<String>, // §5 client-side check
+    refresh_url: Url,                   // https://identity:8186/workload-svid
+    ttl_target: Duration,               // requested TTL, default 1800s
+    refresh_window: f32,                // refresh at this fraction of remaining TTL, default 0.5
+}
+```
+
+State transitions:
+
+| State | Trigger | Action |
+|---|---|---|
+| `Bootstrapping` (boot) | `start()` called | Set `current = bootstrap`; spawn refresh task; first attempt fires immediately. |
+| `Bootstrapping` → `Refreshed` | First `/workload-svid` succeeds | Atomic-swap `current` to the workload SVID; log `info` once. |
+| `Refreshed` → `Refreshed` | Background sweep at `remaining_ttl / 2` | Same as first attempt. Atomic-swap on success. |
+| `Refreshed` → `Refreshing-stale` | Background sweep fails (3 retries × `1s/4s/16s` jitter, 60s total wall budget) | Keep `current` unchanged. Log `warn`. Retry in `min(60s, remaining_ttl/4)`. |
+| `Refreshing-stale` → `Bootstrap-fallback` | `current.not_after` passes with no successful refresh | Atomic-swap `current` back to `bootstrap`. Log `error`. Continue retry loop. |
+| any → `Stopped` | `stop()` called or drop | Abort the refresh task. `current` is observable until the parent process exits. |
+
+The **atomic swap** is via `arc_swap::ArcSwap<CertPair>` — outbound
+reqwest clients read `current.load()` per request and rebuild their
+internal client only when the pointer changes (cheap; one `Arc`
+equality check). Receive-side `axum-server` is a more delicate
+animal — see §5 for the dual-listener `Arc<ArcSwap<ServerConfig>>`
+shape rustls supports.
+
+**No in-flight request is broken** by a swap. reqwest's connection
+pool holds connections under the old SVID until they idle out;
+new connections use the new SVID. Receive-side rustls's
+`ResolvesServerCert` trait makes the swap per-handshake.
+
+### 5. SDK helper crate placement
+
+A single helper module owns the state machine, the atomic swap, and
+the client-side SPIFFE check. Two location candidates:
+
+- **Option A: New module in `warden-sdk`** — `warden_sdk::mtls`. Pros:
+  every service already depends on `warden-sdk` (the typed async
+  client surface) so no new dep edge. Cons: `warden-sdk` is the
+  *integrator* SDK consumed by external code; adding internal
+  refresh plumbing widens its surface.
+- **Option B: New crate `warden-workload-identity`** — narrow scope,
+  zero external surface, depended on by every workspace service.
+  Pros: clean module boundary; `warden-sdk` stays integrator-facing.
+  Cons: one more crate in the workspace.
+
+The §11 open-question block locks the answer in session 2 — both
+are workable; Option B is the structurally cleaner default. The
+helper exposes one type:
+
+```rust
+pub struct WorkloadIdentity { /* private */ }
+
+impl WorkloadIdentity {
+    pub fn from_env() -> Result<Self, ConfigError>;
+    pub async fn start(&self) -> Result<(), StartError>;
+    pub fn reqwest_client(&self) -> reqwest::Client;
+    pub fn rustls_server_config(&self) -> Arc<rustls::ServerConfig>;
+    pub async fn shutdown(self);
+}
+```
+
+`from_env` reads the bootstrap-cert paths
+(`WARDEN_<SVC>_TLS_DIR`/`WARDEN_<SVC>_TLS_CA_PATH` etc.), the
+expected-peer allowlist
+(`WARDEN_<SVC>_EXPECTED_PEER_SPIFFE=spiffe://warden.local/service/identity,...`),
+and the refresh URL (`WARDEN_<SVC>_WORKLOAD_REFRESH_URL`, default
+`https://identity:8186/workload-svid` in compose; absent → refresh
+disabled, behave exactly as v1.x+2 — bootstrap-only).
+
+`reqwest_client()` returns a client whose `Identity` is sourced from
+`current.load()` at request time. Implementation detail: the helper
+holds a single long-lived reqwest::Client whose middleware updates
+the underlying `Identity` via a custom `Connect` adapter; alternative
+implementations may rebuild the client on swap if the middleware
+approach is awkward in reqwest 0.12.
+
+`rustls_server_config()` returns an `Arc<ServerConfig>` whose
+`ResolvesServerCert` impl looks up `current.load()` per handshake.
+Existing `axum-server` callsites change one line — passing the
+helper's config instead of the static `RustlsConfig::from_pem`
+call.
+
+### 6. Server-side SPIFFE SAN-URI check (closes B7-§10 Q2)
+
+The reqwest client built by the helper installs a custom
+`rustls::client::danger::ServerCertVerifier` that, after the
+standard CA-chain verification, extracts the SAN URI from the
+server's leaf cert and checks it against
+`expected_server_spiffe`. Mismatch returns
+`rustls::Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)`
+and rustls closes the TLS connection before the HTTP layer
+sees the response.
+
+The check is **strict equality** against one entry in the list, not
+prefix-match. `spiffe://warden.local/service/policy-engine` matches
+only itself; the allowlist is typically 1-3 entries (the legitimate
+servers this caller talks to).
+
+**Configuration:** `WARDEN_<SVC>_EXPECTED_PEER_SPIFFE` — comma-
+separated list. Per-caller (proxy, console, simulator, …), each with
+its own set. Missing env → check disabled (warn-mode log on each
+call); operators flip to enforce by setting the env. This staged
+rollout means a misconfigured allowlist after a CA-root rotation
+fails open rather than taking the stack down — the v1.x+2 posture is
+strictly preserved as the warn-mode default.
+
+Helm chart `warden.backendEnvs` auto-injects the expected-peer envs
+when `tlsBundle.secretName` is set, deriving the value from the
+graph (proxy talks to brain/policy/hil/identity; console talks to
+ledger/policy/hil/identity/agents — all already encoded in the
+backend-URL helper).
+
+### 7. Chain v3 forensic event
+
+Each successful `/workload-svid` mint emits to `warden.forensic`:
+
+```json
+{
+  "event_kind": "svid.workload_refreshed",
+  "issued_id":  "<uuidv7>",
+  "spiffe_id":  "spiffe://warden.local/service/<name>",
+  "caller_kind": "bootstrap" | "workload",
+  "ttl_seconds": 1800,
+  "issued_at":  "2026-05-14T13:00:00Z",
+  "expires_at": "2026-05-14T13:30:00Z"
+}
+```
+
+Persisted as a chain v3 row with the standard signed envelope
+(`warden-identity` self-signs via Vault Transit or
+`Ed25519FileSigner`, same path the existing `svid.minted` event
+takes). The `caller_kind` field is the operator-relevant tell — a
+sustained run of `caller_kind=bootstrap` past pod-uptime + first-
+refresh-window flags a service whose refresh is failing.
+
+A new Grafana panel (`warden_identity_workload_refreshes_total{
+caller_kind, service }`) plus a stat-tile of "bootstrap-only services
+in the last 1h" lands in session 2.
+
+### 8. Failure & fallback semantics
+
+| Failure | Behaviour | Reasoning |
+|---|---|---|
+| `warden-identity` unreachable on `/workload-svid` | Caller logs `warn`, retries with `1s/4s/16s` backoff; keeps current credential. After current credential expires: falls back to bootstrap cert. | Refresh is *additive*; the bootstrap path is always available. A long identity outage degrades to "running on bootstrap" — same posture as v1.x+2. |
+| `/workload-svid` returns 403 (`caller_not_allowed`) | Caller logs `error` once per backoff loop and continues to retry. Operator must extend `WARDEN_IDENTITY_WORKLOAD_ALLOWED_CALLERS` and roll identity. | Persistent 403 means the operator removed this service from the allowlist deliberately or accidentally — let the human notice; do not bake-in auto-decommission. |
+| Server-side SPIFFE SAN-URI mismatch (client-side check) | rustls closes the TLS connection before the HTTP layer sees the response. Caller surfaces as a `reqwest::Error` with `is_request()` true; the existing retry / circuit-breaker logic on each call site handles it. | Cryptographic check, not policy — no body to read. |
+| `WARDEN_<SVC>_EXPECTED_PEER_SPIFFE` unset | Client-side check disabled (warn-mode log on each call). Connection succeeds against any warden-CA cert at the configured DNS name. | Staged rollout: v1.x+2 posture preserved as default; operators flip the env when ready to enforce. |
+| Helper start failure (env missing, cert unparseable) | Service refuses to boot with a precise error message naming the missing env or unparseable file. | Misconfiguration must be loud — silent fall-back to a partial trust posture is the failure mode this slice exists to prevent. |
+| Vault Transit unreachable mid-refresh | Identity returns `503 signing_unavailable`; caller treats as transient (retry loop). | Same posture as v1.x+2 — Vault is a hard dep for identity. |
+
+The fallback chain is **bootstrap → workload → bootstrap**: the
+service boots on the bootstrap cert, swaps to a workload SVID once
+identity issues one, and reverts to the bootstrap cert if the SVID
+expires with no successful refresh. Each transition logs at `info`
+(refresh success), `warn` (transient refresh failure), or `error`
+(reverted to bootstrap; refresh still failing).
+
+### 9. Implementation roadmap
+
+Five sessions, each independently shippable:
+
+| # | Scope | Touches | Status |
+|---|---|---|---|
+| 1 | **This section** — pre-agree the wire shape, refresh state machine, and SDK helper API. No code. | `warden-specs/TECH_SPEC.md` (this section), `warden-specs/FEATURES.md` §14.20 | **Shipped** v0.8.5 |
+| 2 | **Helper crate + `/workload-svid` endpoint + identity self-refresh.** Whichever location §11 Q1 settles for the helper. New endpoint on `warden-identity` with auth via the existing `service/*` allowlist. Chain v3 `svid.workload_refreshed` event. Identity itself adopts the helper as the first caller (proves the no-cold-start path). | `warden-sdk` (or `warden-workload-identity`), `warden-identity`, `warden-ledger` (chain v3 event type), `warden-specs/FEATURES.md` | **Queued** |
+| 3 | **Roll helper through proxy + brain + policy-engine.** Three services already speak mTLS on every receive path (B7 sessions 3+4). One-line callsite change: pass `WorkloadIdentity::rustls_server_config()` instead of static `RustlsConfig::from_pem` to `axum_server::bind_rustls`. Outbound `reqwest::Client` similarly. | `warden-proxy`, `warden-brain`, `warden-policy-engine` | **Queued** |
+| 4 | **Roll helper through ledger + hil + console + simulator + deep-review + demo-mint.** Same pattern as session 3 across the remaining six services. Receive-side dual-listener pattern (ledger, hil, identity) keeps both ports; only the mTLS port consumes the helper's server config. | `warden-ledger`, `warden-hil`, `warden-console`, `warden-simulator`, `warden-deep-review`, `warden-demo-mint` | **Queued** |
+| 5 | **Server-side SPIFFE SAN-URI check.** Flip every outbound caller from "warn-mode" (warn-log on missing env) to "enforce" by setting `WARDEN_<SVC>_EXPECTED_PEER_SPIFFE` in compose + helm chart. Verify end-to-end: stolen brain cert presented at the policy-engine DNS name → reqwest closes the connection with `ApplicationVerificationFailure`. | `warden-e2e/{prod,dev}/docker-compose.yml`, `warden-charts/charts/warden/values.yaml`, `warden-charts/charts/warden/templates/_helpers.tpl` | **Queued** |
+
+Sessions 2 and 5 are the only ones that materially change behavior;
+sessions 3 + 4 are mechanical callsite swaps once session 2 ships
+the helper. The slice ends with v1.x+2's bootstrap-only posture
+formally retired — the new posture is "workload SVIDs as primary
+credential, bootstrap as fallback only."
+
+### 10. What this spec deliberately does not include
+
+- **Hot-reload of the warden CA root.** A CA-root rotation still
+  requires re-running `gen_certs.sh` and rolling every Deployment.
+  The workload SVID is signed by the CA root, so a root rotation
+  invalidates every outstanding workload SVID; the bootstrap cert
+  is the operational fallback that makes the roll graceful, but
+  the roll itself is not avoided.
+- **SVID issuance for the NATS server.** NATS does not cert-hot-
+  reload without dropping client connections; the 1-year bootstrap
+  cert stays as the server-side credential.
+- **Per-tenant workload allowlists.** Today the allowlist is
+  workspace-scoped (every `service/*` listed is allowed). Per-
+  tenant scoping is a year-2 multi-tenant question per
+  [§Threat model](#threat-model) "Open items".
+- **Workload-SVID-backed action signing.** `/sign` keeps the
+  bootstrap-cert posture for now — verdict signing is on the
+  hot path and we don't want a refresh failure to take that
+  service down. A future spec lock can promote `/sign`'s caller
+  auth to workload-SVID once session 5's posture is settled in
+  production.
+- **A revocation feed for workload SVIDs.** Short TTL (≤30min
+  default) caps the leak window without a denylist. The full
+  revocation feed is the B1 follow-up (proxy-side denylist
+  consumption) and lives in its own slice.
+
+### 11. Open questions (lock in session 2)
+
+1. **SDK helper location: `warden-sdk::mtls` vs new
+   `warden-workload-identity` crate.** Both work; default
+   recommendation is Option B (clean module boundary).
+2. **Default `ttl_seconds`: 900s (15min), 1800s (30min), or
+   3600s (60min).** Trade-off is refresh load on identity vs.
+   revocation effectiveness window. Recommendation: 1800s
+   matches the bottom of the "≤1h" agent SVID ceiling, halves
+   the leak window vs. agents, and keeps identity at < 1 RPS
+   even with 10+ services.
+3. **Refresh window: 50% remaining TTL (recommendation), 75%,
+   or operator-configurable.** A 50% window gives one
+   complete retry cycle before expiry; 75% adds slack for a
+   long identity outage.
+4. **Chain v3 event sampling.** Every refresh in normal
+   operation produces a row — at 1800s default + 10 services,
+   that's ~480 rows/day. Acceptable for the demo VPS; possibly
+   noisy at scale. Options: emit every refresh (recommendation
+   for v1; observability wins), sample every Nth, or emit only
+   on `caller_kind=bootstrap` transitions (proves rotation
+   propagation without per-refresh chatter).
+5. **Client-side check rollout posture.** Hard-flip to enforce
+   in session 5 (recommendation — staged warn-mode runs in
+   sessions 3+4 give every service one full session of
+   warn-only telemetry before enforce) vs. permanent
+   warn-mode + opt-in enforce.
+6. **NATS-client SVID adoption.** NATS clients reuse the
+   workload SVID for the handshake; the NATS server itself
+   stays on the bootstrap cert (§2). Confirm acceptable in
+   session 2; alternative is leaving NATS-client side on
+   bootstrap too, simplifying the slice but losing G1
+   coverage on the NATS leg.
+
+§11 answers will be inlined in §10-style "Decided" prose at the
+top of session 2's commit, mirroring the v1.x+2 §10 pattern.
 
 ---
 
