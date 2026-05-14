@@ -14,6 +14,7 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 - [Demo experience](#demo-experience) — public-facing demo design
 - [Console policy management](#console-policy-management) — read + CRUD + activate/deactivate of `*.rego` and `*.json` policies from the console
 - [Forensic-tier deep review](#forensic-tier-deep-review) — async heavy-LLM auditor running against a sampled slice of the audit stream
+- [Internal service mTLS](#internal-service-mtls) — agreed substrate for proxy↔backend hops (designed; implementation deferred to v1.x+2)
 - [Threat model](#threat-model) — STRIDE-organized, layer-by-layer
 - [Runbooks](#runbooks) — five on-call failure modes
 
@@ -1120,7 +1121,7 @@ The trust path is **mode-dependent** because WebAuthn already has a stronger pri
 - **WebAuthn mode (today, unchanged):** HIL is the credential authority. The console proxies WebAuthn ceremonies and shuttles HIL's session cookie back to the browser; subsequent `/decide` calls attach the HIL cookie and HIL stamps `decided_by` from the verified principal.
 - **OIDC / basic-admin / disabled:** HIL has no credential to verify, so console and HIL share a bearer secret (`WARDEN_HIL_DECIDE_TOKEN`). Console verifies OIDC (or basic-admin), stamps `decided_by`, and presents the bearer on `/decide`. HIL trusts the request-body `decided_by` *only when* a valid bearer is present; without the bearer, the existing `Authn::Disabled` fallback applies. Console refuses to boot if the configured mode requires the token and it is missing; HIL defaults to per-request validation (401 on a token-less decide) but operators can opt into the same boot-time guard by setting `WARDEN_HIL_REQUIRE_DECIDE_TOKEN=true` — HIL then refuses to start unless `WARDEN_HIL_DECIDE_TOKEN` is also set. The opt-in keeps backward compatibility while letting bearer-only deployments fail loudly on first start.
 
-The bearer is the interim posture for the non-WebAuthn modes; internal s2s mTLS via warden-identity SVIDs (deferred service-mesh work, see "Threat model — Open items") will replace it uniformly across all modes including WebAuthn.
+The bearer is the interim posture for the non-WebAuthn modes; internal s2s mTLS via warden-identity SVIDs (substrate decision recorded in [Internal service mTLS](#internal-service-mtls); implementation deferred to v1.x+2) will replace it uniformly across all modes including WebAuthn.
 
 ### 7. Mechanical defaults
 
@@ -1945,6 +1946,241 @@ The architectural decisions resolved by `/grill-me`:
 
 ---
 
+## Internal service mTLS
+
+Companion to [Identity service](#identity-service) (SVID issuance) and
+the cross-cutting threat-model action items below (`proxy ↔ brain /
+policy / hil / identity`, `deep-review ↔ NATS`). Captures the
+substrate decision so the wire contract is pre-agreed when the
+implementation lands.
+
+**Module status:** **designed 2026-05-14**, **implementation
+deferred** to v1.x+2 (roadmap item B7). Today every internal hop is
+plain HTTP over the deployment perimeter — proxy, console, and
+deep-review trust the docker network or k8s `NetworkPolicy` for
+caller authenticity. A compromised pod on the overlay can speak
+directly to brain / policy / hil / identity and forge requests. The
+threat model tags this explicitly under each layer's STRIDE
+"Tampering" axis; this section is the agreed-upon way to close it.
+
+### 1. Hops in scope
+
+| Hop | Volume | Sensitivity |
+|---|---|---|
+| proxy → brain `/inspect` | per-request | high — verdict drives allow / deny |
+| proxy → policy-engine `/evaluate` | per-request | high — verdict |
+| proxy → hil `/pending` | per-pending | high — operator queue manipulation |
+| proxy → identity `/sign` | per-request | **highest — signing oracle** |
+| console → ledger / hil / policy-engine / identity | per-page | medium — read + mutate surface |
+| deep-review → ledger (bundle fetch, if added) | per-finding | medium |
+| service → NATS pub/sub (`warden.audit`, `warden.forensic`) | continuous | **separate slice — see §8** |
+
+The proxy → identity hop is structurally special: it is the
+SVID-mint surface, so the caller cannot already hold an SVID for the
+very first call. The bootstrap pattern (§4) is what unblocks it.
+
+### 2. Three substrates considered
+
+**A. Extend warden-identity SVIDs to services (CHOSEN).** Add a new
+SPIFFE path `spiffe://warden.local/service/<name>` and have each
+service hold its own SVID. Identity already mints SVIDs for *agents* —
+same primitives, same trust root, same Vault Transit rotation.
+Service code grows a "fetch + refresh SVID" client (one shared lib
+in `warden-sdk`); servers gain a SPIFFE-URI verifier with an
+allowlist. Compose, k8s, bare metal, and `warden-lite` all keep
+working.
+
+**B. Service mesh (Linkerd / Istio / Cilium) — REJECTED.** Zero
+application code, but three hard cons for warden: (i) the compose
+dev stack has no mesh and cannot really have one — the local-loop
+story breaks; (ii) `warden-lite` (single-binary OSS) and bare-VM
+deploys cannot use a mesh either; (iii) the chain v2/v3 signing
+model wants application-level identity ("this verdict came from
+brain"), not pod-level mesh identity ("this came from a pod with a
+sidecar"). Mesh-as-substrate would force warden into k8s-only.
+Operators may layer a mesh on top of the chosen substrate (warden
+is mesh-agnostic), but the *trust root* stays warden-identity.
+
+**C. Statically-rolled CA + per-service certs only — partially
+absorbed as the bootstrap layer (§4).** Extending
+`warden-proxy/scripts/gen_certs.sh` to mint a cert pair per service
+under the same CA root is the smallest diff and works everywhere.
+But rotation requires service restart and there is no dynamic
+identity — the cert just carries a CN. This is rejected as the
+*only* mechanism (no rotation) but absorbed as the **boot path**
+for option (A), via §4.
+
+### 3. Wire shape
+
+SPIFFE URI: `spiffe://warden.local/service/<name>` where `<name>` is
+the kebab-cased component (`proxy`, `brain`, `policy-engine`, `hil`,
+`identity`, `ledger`, `deep-review`, `console`). Identity reserves
+the `service/*` namespace alongside the existing `agent/*` and
+`proxy/*` namespaces; the registration mode (`enforce` /  `warn`)
+applies uniformly.
+
+Server side (every backend):
+
+- Loads its server cert + key (PEM, PKCS#8) and the warden CA root
+  on boot. Cert path defaults to `${WARDEN_<SVC>_TLS_DIR:-/certs}`.
+- Boots HTTPS via `axum-server` + `rustls`. Plain-HTTP listen path
+  is preserved on a separate port (`/health`, `/readyz` only — same
+  pattern the proxy already uses for the kubelet probe).
+- Verifies caller's client cert chains to the CA root *and* the
+  caller's SAN URI matches an allowlist:
+  `WARDEN_<SVC>_ALLOWED_CALLERS=spiffe://warden.local/service/proxy,spiffe://warden.local/service/console`.
+- 401 (not 403) on mismatch with body `{"error":"untrusted_caller"}` —
+  matches existing identity-side `unregistered_agent` shape.
+
+Client side (proxy, console, deep-review):
+
+- Loads its client cert + key + CA on boot.
+- Presents the cert on every outbound hop. `reqwest::Client` with
+  `tls_built_in_root_certs(false)` + `add_root_certificate(ca)` +
+  `identity(client_pkcs12_or_pem)`.
+- Verifies server cert chains to the same CA root. Server SAN
+  matched by URL host today (k8s Service DNS); no SPIFFE-on-server
+  check at v1 — see §10 "Open questions" for the deferred follow-up.
+
+`X-Warden-Mtls-Identity` header is **not** added — caller identity
+is the SAN URI on the verified client cert. Adding a header would
+let an attacker who breaches one server forge it. (Equivalent posture
+to the existing proxy-mTLS gate on `/mcp`.)
+
+### 4. Bootstrap
+
+Identity is the bootstrap target itself — its receive path cannot
+require an SVID the caller does not yet hold. Two-tier solution:
+
+1. **Bootstrap cert (option C absorbed).** `gen_certs.sh --env <env>`
+   mints a long-lived (1 year default — see §10 Q1) per-service cert
+   under the same CA root. Each service Secret carries its own
+   server + client pair. Configured via `WARDEN_<SVC>_TLS_DIR` and
+   mounted by the helm chart (see §7).
+2. **Workload SVID refresh (deferred to v1.x+3).** Once the
+   bootstrap cert is online, a service may call identity's existing
+   `/sign` endpoint to obtain a short-lived SVID with the
+   `service/<name>` SPIFFE URI and present it on subsequent hops.
+   The bootstrap cert stays as the fallback if SVID refresh fails.
+   **Not in v1.x+2.**
+
+Identity's own `/sign` receive path accepts both forms: a bootstrap
+cert (long-lived, deploy-time) or a fresh workload SVID. The
+`WARDEN_IDENTITY_SIGN_ALLOWED_CALLERS` env (already in place) gains
+the `service/*` prefix.
+
+### 5. Trust root
+
+Single CA: the warden CA root generated by `gen_certs.sh`. The same
+root signs:
+
+- The existing proxy server cert (`certs/server.pem`).
+- The existing proxy client cert (`certs/client.pem`) used as the
+  CA bundle for agent-side mTLS.
+- The new per-service server + client certs (this section).
+- The existing dynamic SVIDs minted by warden-identity for agents.
+
+One CA root keeps the trust chain simple and lets `warden-identity`
+remain the sole authority. Mesh-issued certs (if an operator
+overlays a mesh) live in a parallel trust domain and are out of
+scope for warden's chain-anchored identity model.
+
+### 6. Rotation
+
+In v1.x+2 (this slice), bootstrap-cert rotation rides the existing
+[`Runbooks` §7 "Routine issuer-key rotation"](#runbooks):
+
+1. Rerun `gen_certs.sh --env <env>` to mint a new cert series.
+2. Update Secret(s) in the cluster (or compose `secrets:` mount).
+3. `kubectl rollout restart` each service Deployment. Bootstrap
+   certs are read once at boot; there is no hot-reload at v1.x+2.
+4. CA-root rotation is a separate process (see [Runbooks §6
+   "Issuer-key compromise"](#runbooks)) — overlaps with the SVID
+   rotation already documented there.
+
+The dynamic SVID workload-cert refresh path (v1.x+3) inherits Vault
+Transit rotation for free.
+
+### 7. Helm chart wiring
+
+The umbrella chart at `warden-charts/charts/warden/` (v0.2.0)
+already supports `proxyTls.secretName` — a single k8s Secret carrying
+the proxy + identity cert bundle. v1.x+2 evolves this to
+`tlsBundle.secretName` carrying every service's cert pair:
+
+```
+ca.pem
+service.<name>.pem
+service.<name>.key
+client.<name>.pem
+client.<name>.key
+```
+
+The chart mounts the Secret read-only at `${WARDEN_<SVC>_TLS_DIR}`
+on each Deployment, projecting only the keys relevant to that
+service (k8s Secret `items:` projection — server pod gets server +
+CA, never another service's private key).
+
+NetworkPolicy (`networkPolicy.enabled=true`) becomes
+**belt-and-braces** rather than the sole perimeter: a defense-in-depth
+layer that limits *which pods* can attempt a TLS handshake, on top
+of the cryptographic mTLS check.
+
+### 8. Out of scope (this section)
+
+- **NATS pub/sub TLS.** Substrate-level (`nats:2 --tls`), not
+  application-level. Tracked as roadmap follow-up **B7.5**. Doing
+  both in one cycle is too large; the application-cert work alone
+  closes the proxy↔backend forgery class, which is the bigger of
+  the two holes.
+- **`warden-lite`.** Single-binary OSS edition has no internal hops
+  (proxy + ledger + sandbox all in one process). Out of scope by
+  construction.
+- **Mesh integration.** Operators who run a mesh may layer it on
+  top — warden is mesh-agnostic. The substrate decision is for
+  warden's own trust root, not a ban on mesh use.
+- **mTLS for external HTTP egress** (webhook sinks, vendor calls
+  to Anthropic etc.). Already covered by `rustls` defaults — not
+  the same problem as internal s2s.
+
+### 9. Implementation roadmap
+
+Six sessions, paced to keep blast radius small:
+
+| # | Scope | Touches |
+|---|---|---|
+| 1 | **This section** — pre-agree the wire shape. No code. | `warden-specs/TECH_SPEC.md` (this section), `warden-specs/FEATURES.md` §14.x |
+| 2 | Extend `gen_certs.sh` to mint per-service bootstrap certs. Helm chart `proxyTls.secretName` → `tlsBundle.secretName`. Compose bind-mounts updated. Identity gains `service:*` SPIFFE prefix allowance. | `warden-proxy/scripts/gen_certs.sh`, `warden-charts/`, `warden-e2e/{prod,dev}/docker-compose.yml`, `warden-identity` |
+| 3 | **Brain pilot** — `axum-server` + `rustls` TLS receive path. SPIFFE SAN allowlist verifier. Proxy gains client-cert outbound on `/inspect`. | `warden-brain`, `warden-proxy` |
+| 4 | Same pattern for policy-engine + hil + ledger + deep-review (ledger fetch only — NATS stays plain at this stage). | `warden-policy-engine`, `warden-hil`, `warden-ledger`, `warden-deep-review`, `warden-proxy`, `warden-console` |
+| 5 | Console-side outbound mTLS for ledger / hil / policy / identity. Identity-receive-path SVID validation. | `warden-console`, `warden-identity` |
+| 6 | E2E verify (`warden-e2e/run-stack-e2e.sh` extended), threat-model section trim, runbook for cert-pair rotation, spec lock. | `warden-e2e/`, `warden-specs/TECH_SPEC.md` |
+
+The dynamic SVID workload-cert refresh path (option A's full form)
+is **v1.x+3** — a follow-up that swaps bootstrap-cert reads for
+SVID fetches once every service speaks mTLS.
+
+### 10. Open questions (call before session 2)
+
+1. **Bootstrap cert lifetime.** 1 year (default) vs. 90 days. Longer
+   = less rotation pain; shorter = better blast-radius posture.
+   Default lean: **1 year**, document rotation under the existing
+   issuer-key runbook.
+2. **Server-side SPIFFE check on the client side.** Today the client
+   verifies server cert via DNS-host match against the Service name.
+   A stronger posture verifies the server cert's SAN URI matches an
+   expected SPIFFE URI (e.g. `spiffe://warden.local/service/brain`).
+   Stronger but adds code to every outbound caller. Default lean:
+   **defer to v1.x+3** alongside the SVID refresh work.
+3. **NATS TLS — separate or same cycle.** Doing both at once is more
+   work but avoids leaving a hole. Default lean: **separate, B7.5**.
+4. **Health-probe port posture.** Kubelet probes the plain-HTTP
+   health listener; that listener stays plain in v1.x+2 (probes have
+   no caller cert). Default lean: **plain HTTP on the health port,
+   mTLS on the application port** — same as the proxy already does.
+
+---
+
 ## Threat model
 
 
@@ -2088,10 +2324,12 @@ trust boundary is the proxy-brain link. We don't run mTLS on this link
 today; the assumption is the deployment perimeter (compose network /
 k8s NetworkPolicy) is the perimeter.
 
-→ **Action item, tracked under the deferred service-mesh work:** add SPIFFE
+→ **Action item, tracked in [Internal service mTLS](#internal-service-mtls):** add SPIFFE
 mTLS to the proxy↔brain, proxy↔policy, proxy↔hil, proxy↔identity links
 so an attacker who lands on the cluster's overlay network cannot speak
-directly to the brain and forge `BrainRequest` payloads.
+directly to the brain and forge `BrainRequest` payloads. Substrate
+decided (warden-identity SVIDs over a single warden CA); implementation
+deferred to v1.x+2.
 
 #### Repudiation
 
@@ -2195,8 +2433,10 @@ Deep-review reads from NATS and posts to Anthropic. There is no
 inbound HTTP request surface — its only published port is the
 Prometheus `/metrics` endpoint.
 
-→ **Same deferred service-mesh action item as brain / policy / hil:**
-add SPIFFE mTLS to the NATS link so an attacker who lands on the
+→ **NATS-side action item tracked separately as B7.5** (see
+[Internal service mTLS](#internal-service-mtls) §8 — NATS TLS is
+substrate-level and intentionally split out from the application-cert
+slice). Adds TLS to the NATS link so an attacker who lands on the
 overlay network cannot publish forged forensic rows that deep-review
 would dutifully feed into a paid vendor call.
 
@@ -2401,7 +2641,7 @@ The following threat-model gaps are tracked but not yet closed.
 
 | Gap | Status |
 |---|---|
-| Internal s2s mTLS (proxy↔brain/policy/hil/identity). | Deferred service-mesh work; substrate choice (warden-identity SVID-based mTLS vs. mesh-layer at deploy time) depends on the deployment story. |
+| Internal s2s mTLS (proxy↔brain/policy/hil/identity). | Substrate decided 2026-05-14 — see [Internal service mTLS](#internal-service-mtls). warden-identity SVIDs over a single warden CA; bootstrap via long-lived per-service certs rolled by `gen_certs.sh`; dynamic workload-SVID refresh deferred to v1.x+3. Implementation queued as roadmap B7 (v1.x+2). |
 | Per-region key rotation runbook for `warden-identity`. | Shipped — [Runbooks](#runbooks) §7 "Routine issuer-key rotation" (Vault Transit + file-signer paths). |
 | Multi-tenant audit-log isolation in the console. | Year-2 product question. |
 
