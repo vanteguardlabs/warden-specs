@@ -1720,9 +1720,10 @@ The 2026-05-13 spec audit (recorded in `/home/debian/claude/.claude/plans/replic
 Tracked at `TECH_SPEC.md#threat-model` "Open items":
 
 - **Internal s2s mTLS** (proxy↔brain/policy/hil/identity) — substrate choice (warden-identity SVID-based mTLS vs. mesh-layer at deploy time) depends on the deployment story.
-- **Per-region key rotation runbook** for `warden-identity` — tracked as a follow-on supply-chain slice.
-- **Identity-compromise runbook** — `TECH_SPEC.md` line 1778, `**TODO: write that runbook as a follow-on supply-chain slice.**`
+- ~~**Per-region key rotation runbook**~~ — *Shipped 2026-05-14 (v0.6.7)* as `TECH_SPEC.md#runbooks` §7 "Routine issuer-key rotation"; covers both Vault Transit and `Ed25519FileSigner` paths.
+- ~~**Identity-compromise runbook**~~ — *Shipped 2026-05-14 (v0.6.7)* as `TECH_SPEC.md#runbooks` §6 "Issuer-key compromise"; the prior `TODO: write that runbook` marker in the threat-model section is now resolved.
 - **Multi-tenant audit-log isolation** in console — year-2 product question.
+- **Multi-key file-signer** — surfaced by the §7 runbook: `Ed25519FileSigner` today loads exactly one PEM, so rotation drops pre-rotation row verifiability. Queued as a follow-up (extend `from_env` to accept a comma-separated PEM list, publish all of them in JWKS).
 
 ### 14.6 Acknowledged future work (spec-level)
 
@@ -1755,6 +1756,14 @@ Two further v1.x+1 items closed after the v0.6.4 quick-wins blitz. Spec text upd
 
 - **`--delegation-mix` simulator flag (v0.6.5)** — `warden-simulator/src/delegation.rs`. Comma-separated principal pool stamped per fire as an unsigned `X-Warden-Grant` JWT. Proxy treats unsigned grants as advisory metadata (`warden-proxy/src/grant.rs` v1 trust model). Console `/audit` now renders varied "Delegation: alice@acme via cs-bot-1" badges. Compose default: `alice@acme.com,bob@acme.com,carol@globex.com,dana@globex.com`. See §14.2.
 - **`Ed25519FileSigner` alt-backend (v0.6.6)** — second `Sign` impl in `warden-identity/src/signer.rs` for OSS / warden-lite deployments that skip Vault. Loads a PKCS#8 PEM key from `WARDEN_IDENTITY_SIGNING_KEY_PATH`, signs with `ed25519-dalek` directly, publishes the SPKI public PEM at `/jwks.json`. Wire envelope (`vault:v1:<base64>`) shared with the Vault path so the ledger verifier strip stays unchanged; `kid` (`warden-identity-file:v1` default, override via `WARDEN_IDENTITY_SIGNING_KEY_ID`) distinguishes the backend. Vault wins when both env vars are set — production posture unchanged. Security trade-off documented in `TECH_SPEC.md#threat-model` §"warden-identity" §Information disclosure: file backend trades "key out of process" for "no Vault dep" and is recommended only for single-replica OSS deployments.
+
+### 14.9 v0.6.7 ship log (2026-05-14)
+
+Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps the threat-model audit flagged.
+
+- **Runbook §6 "Issuer-key compromise" (B4)** — P0 incident response for a leaked Vault token, exfiltrated PKCS#8 PEM (file-signer path), or red-team forgery report. Six-step remediation: rotate signing key → revoke leaked credential → re-issue every SVID (suspend + unsuspend the fleet) → audit the chain for forgeries via `wardenctl ledger verify --since <ts>` → file the incident report → escalate. Covers both Vault Transit and `Ed25519FileSigner` paths; calls out the file-signer's single-key limitation as a forensic-gap event in compromise rotation.
+- **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
+- **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
 ---
 

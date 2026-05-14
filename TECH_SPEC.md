@@ -2322,9 +2322,9 @@ signature, every SVID, and every grant becomes attacker-controlled. The
 ledger chain itself is recoverable (deterministic from the prev rows),
 but the **signature** layer of v2/v3 is not. The deployment recovery
 posture is: rotate the signing key, re-issue SVIDs, force every agent
-to re-onboard. Documented in [Runbooks](#runbooks) "identity service
-unreachable" with a follow-on "identity compromise" runbook
-**TODO: write that runbook as a follow-on supply-chain slice.**
+to re-onboard. Documented in [Runbooks](#runbooks) §5 "identity
+service unreachable" (operational outage) and §6 "issuer-key
+compromise" (this incident class).
 
 ### warden-console
 
@@ -2403,7 +2403,7 @@ The following threat-model gaps are tracked but not yet closed.
 | Gap | Status |
 |---|---|
 | Internal s2s mTLS (proxy↔brain/policy/hil/identity). | Deferred service-mesh work; substrate choice (warden-identity SVID-based mTLS vs. mesh-layer at deploy time) depends on the deployment story. |
-| Per-region key rotation runbook for `warden-identity`. | Tracked as a follow-on supply-chain slice (`TODO` in §"warden-identity" above). |
+| Per-region key rotation runbook for `warden-identity`. | Shipped — [Runbooks](#runbooks) §7 "Routine issuer-key rotation" (Vault Transit + file-signer paths). |
 | Multi-tenant audit-log isolation in the console. | Year-2 product question. |
 
 ### Reporting
@@ -2683,3 +2683,275 @@ chaos-monkey `attestation_signed` scenario).
 broke; security on-call second; dev on-call last. The identity service
 is on the trust-chain hot path so an outage longer than 1 hour is a
 P0 — chain v2 signature gap will require a forensic explanation.
+
+---
+
+### 6. Issuer-key compromise
+
+**Symptom.** Rarely auto-detected — the verifier check is JWKS-based,
+and an attacker who has the private key can produce signatures that
+verify cleanly against the published public key. Typical triggers:
+
+- Vault audit log shows unexpected `transit/sign/warden-identity` calls
+  from a token that wasn't supposed to have signing access.
+- A Vault admin token or unseal key was leaked (cloud provider alert,
+  credential-scan hit, ex-employee access not revoked in time).
+- File-signer host: SSH access log shows an unauthorized session,
+  or the PKCS#8 PEM file's mtime / inode changed unexpectedly.
+- A regulator / red-team flags a chain row whose `signature` matches
+  the JWKS-published public key but whose semantics don't match the
+  events around it ("this row says we approved a $1M wire at 02:14
+  UTC; we have no record of that having happened" — forgery).
+
+This is a **P0 security incident.** The clock is on rotating, not
+on triage.
+
+**Triage (≤5 min).**
+
+- Confirm the compromise vector: Vault token? Unseal key? File-signer
+  host shell access? Each maps to a different remediation path below.
+- Decide blast radius: one tenant, one region, or fleet-wide. Vault
+  Transit keys are tenant-aware via the `mount` parameter — a leaked
+  token scoped to one tenant's mount doesn't compromise others.
+- The key is **already** compromised — nothing in Warden detects
+  forgery in real time. Don't spend time hunting for "was it really
+  exploited"; assume yes and rotate.
+
+**Diagnosis.** Determine which backend is in scope:
+
+- **Vault Transit** (production default): the compromised material is
+  one or more Vault tokens with access to `transit/sign/warden-identity`.
+  The Ed25519 private key itself is sealed inside Vault and never leaves
+  — what leaked is the *capability to call sign*, not the key bytes.
+- **`Ed25519FileSigner`** (OSS / `warden-lite`): the compromised
+  material is the PKCS#8 PEM key file on disk. The key bytes are out
+  in the wild — treat the entire filesystem of the affected host as
+  already-exfiltrated (any backup, container snapshot, image registry
+  layer that ever held the file is also in scope).
+
+**Remediation.**
+
+Order matters — rotate the key first so new forgeries become
+impossible, then deal with the leaked credential.
+
+1. **Rotate the signing key.**
+
+   Vault Transit path:
+   ```sh
+   vault write -f transit/keys/warden-identity/rotate
+   ```
+   Vault adds a new version (e.g. v3 → v4). Subsequent `/sign` calls
+   automatically use the latest version. The compromised version
+   stays *published* in JWKS so prior chain rows continue to verify —
+   step 5 is the audit pass that distinguishes legitimate-old-key
+   rows from forged ones.
+
+   File-signer path (single replica recommended — see Known limitations):
+   ```sh
+   # On a clean host (NOT the compromised one — assume that's poisoned):
+   openssl genpkey -algorithm ed25519 -out /etc/warden/identity.v2.key
+   chmod 600 /etc/warden/identity.v2.key
+
+   # Update deployment env to point at the new key + bump the kid:
+   #   WARDEN_IDENTITY_SIGNING_KEY_PATH=/etc/warden/identity.v2.key
+   #   WARDEN_IDENTITY_SIGNING_KEY_ID=warden-identity-file:v2
+
+   kubectl rollout restart deploy/warden-identity
+   ```
+
+2. **Revoke the leaked credential.**
+
+   Vault: revoke the token by accessor so any cached session dies
+   immediately.
+   ```sh
+   vault token revoke -accessor <accessor-id>
+   ```
+   File-signer: shred the leaked key file on every host that held it
+   (including backups). The host is poisoned — schedule its
+   destruction or full re-image once the new identity pod is healthy.
+   ```sh
+   shred -u /etc/warden/identity.v1.key   # on each compromised host
+   ```
+
+3. **Re-issue every SVID.** A compromised signing key means every SVID
+   signed under it could have been forged. Force every running agent
+   to re-attest under the new key:
+   ```sh
+   wardenctl agents list --tenant <tenant> --state active \
+     | xargs -I{} wardenctl agents suspend {} \
+         --reason "issuer-key-compromise-$(date -u +%Y%m%d)"
+   ```
+   Then `agents unsuspend` once each agent's operator has rolled the
+   pod / re-presented attestation. Suspend blocks new SVIDs + grants
+   for the suspended agents per `Agent onboarding (WAO)` §3.2, so the
+   compromised material can't be re-used to issue new credentials
+   while the audit pass runs.
+
+4. **Audit the chain for forged rows.** Walk the chain over the window
+   the credential was exposed:
+   ```sh
+   wardenctl ledger verify --since <suspected-compromise-start>
+   ```
+   Verifier flags one of three outcomes per row: `Valid` (signature
+   matches a JWKS key), `Forged` (signature is well-formed but
+   doesn't verify), `KeyNotInJwks` (kid not published). Treat every
+   `Valid` row signed under the *compromised* version as suspect —
+   correlate with deployment logs / approval audit trail to flag any
+   row that doesn't have a matching upstream event. `Forged` rows
+   are unambiguous evidence of attempted post-hoc tampering.
+
+5. **File the incident report.** Notify any party that consumed your
+   ledger exports — regulators (EU AI Act Article 12 reporting),
+   downstream tenants running federated A2A against your trust
+   domain, customers under SOC 2 / ISO 27001 disclosure obligations.
+   The chain itself is append-only and tamper-evident, so the report
+   can quote exact `seq` ranges + suspect kids.
+
+**Verification.**
+
+- `curl https://<identity>:8086/jwks.json | jq '.keys[].kid'`
+  includes the new key version alongside the old.
+- A freshly-issued chain row carries the new `key_id`:
+  ```sh
+  wardenctl ledger tail --limit 5 | jq '.[].key_id'
+  # Vault path → "warden-identity:v4"
+  # File path  → "warden-identity-file:v2"
+  ```
+- `wardenctl ledger verify --since <rotation-timestamp>` returns 0
+  forgeries (only `Valid` rows under the new kid).
+- Suspended agents re-onboard cleanly — `wardenctl agents list`
+  shows them back to `Active` state.
+
+**Escalation.** Security on-call **(P0)**. CISO if regulators were
+notified. Vault on-call if the compromise vector was a Vault
+credential rather than a Warden host. Notify partners running
+federated A2A within 4 hours — the SPIFFE bundle they polled before
+the rotation now references a kid you've effectively retired.
+
+**Known limitations.**
+
+- **File-signer rotation breaks verification of pre-rotation rows.**
+  `Ed25519FileSigner` today loads exactly one key file and publishes
+  exactly one public key in JWKS — there's no provision for keeping
+  the old key online for verification while the new key is the active
+  signer. Operators on the file backend should treat compromise
+  rotation as a deliberate forensic-gap event and document the gap
+  in the incident report. The Vault path doesn't have this issue.
+  Tracked as a follow-up: multi-key file-signer (extend
+  `Ed25519FileSigner::from_env` to accept a comma-separated list of
+  PEMs so old versions stay in JWKS during rotation).
+- **The chain itself is append-only.** Tampered rows can't be
+  repaired, only flagged. The report should call out exact `seq`
+  ranges so a downstream consumer can decide whether to re-verify or
+  excise them from their own forensic store.
+- **Cross-tenant A2A windows.** Federated peers cache the SPIFFE
+  bundle on their side (default `WARDEN_FEDERATION_POLL_TTL_SECS`,
+  see `Identity service` §10). Until they poll, they're still
+  willing to trust actor-tokens signed by the compromised key. Send
+  an out-of-band notice; don't rely on poll cadence for a P0.
+
+---
+
+### 7. Routine issuer-key rotation
+
+The planned-window version of §6. No compromise — just scheduled key
+hygiene per your security policy.
+
+**When to rotate.**
+
+- Calendar trigger: annual default; quarterly if you're under PCI / FIPS
+  cadence; per-incident if your audit posture demands it.
+- Vault `transit/keys/warden-identity` show a `latest_version` more
+  than ~12 months old (`vault read transit/keys/warden-identity | jq '.data.keys'`
+  for the per-version creation timestamps).
+- After a near-miss (revoked token that *had* signing access but you
+  can't prove it wasn't used) — treat as compromise per §6 instead
+  if the near-miss is plausibly an actual miss.
+
+**Procedure — Vault Transit path (preferred, near-zero downtime).**
+
+```sh
+# 1. Rotate. Vault appends a new version; the previous version stays
+#    available for verification of pre-rotation rows.
+vault write -f transit/keys/warden-identity/rotate
+
+# 2. Confirm JWKS publishes the new version alongside the old.
+curl -s https://<identity-host>:8086/jwks.json | jq '.keys[].kid'
+# Expected: prior versions + the new one. No version is dropped.
+
+# 3. Confirm fresh /sign calls use the new version.
+wardenctl ledger tail --limit 3 | jq '.[].key_id'
+# Expected: every row carries the new kid (e.g. warden-identity:v4).
+```
+
+The proxy + ledger pick up the new kid on the next `/sign` round-trip
+— no pod restart required. Identity reads `latest_version` from Vault
+on every sign call (cheap cached metadata read), so the rotation is
+visible within the first `/sign` after the Vault write completes.
+
+**Procedure — file-signer path (`warden-lite` / OSS).**
+
+```sh
+# 1. Generate a new key on a clean host.
+openssl genpkey -algorithm ed25519 -out /etc/warden/identity.v2.key
+chmod 600 /etc/warden/identity.v2.key
+
+# 2. Update deployment env to point at the new file + bump the kid.
+#    Both env vars MUST change — leaving the kid pointing at v1
+#    publishes the new public key under an old name, which makes
+#    pre-rotation row verification ambiguous.
+#      WARDEN_IDENTITY_SIGNING_KEY_PATH=/etc/warden/identity.v2.key
+#      WARDEN_IDENTITY_SIGNING_KEY_ID=warden-identity-file:v2
+
+# 3. Restart identity. File-signer reads the key once at boot;
+#    there is no hot-reload path today.
+kubectl rollout restart deploy/warden-identity
+
+# 4. Verify JWKS published the new public key.
+curl -s https://<identity-host>:8086/jwks.json | jq '.keys[0].kid'
+# Expected: "warden-identity-file:v2"
+```
+
+**Mixed-version chain window.**
+
+After a Vault rotation the ledger contains rows signed under both
+the old and new versions for the lifetime of the chain (it's
+append-only). JWKS returns *all* active versions so verifiers
+verify either. **There is no retire step in routine rotation.**
+Old versions stay published indefinitely. If a compliance posture
+requires actively retiring an old version, treat as §6 — that's a
+"signal we don't trust this key anymore" event, not a routine.
+
+**Verification.**
+
+- `/jwks.json` includes the new kid alongside the old (Vault path)
+  or the new kid replaces the old (file path — known limitation).
+- Three random rows newer than the rotation timestamp verify against
+  the new kid: `wardenctl ledger verify --since <rotation-ts>`.
+- Three random rows from *before* the rotation also still verify
+  (Vault path only — confirms the old version is still in JWKS).
+  ```sh
+  wardenctl ledger verify --until <rotation-ts> --tail 50
+  ```
+- Proxy logs show no `signing_unavailable` warnings post-rotation.
+
+**Escalation.** None expected — routine rotation is a low-risk Vault
+admin task. If `/sign` starts returning `signing_unavailable` after
+the rotate command, escalate to Vault on-call (the write succeeded
+but `latest_version` isn't visible to identity, which is a Vault
+ACL / replication issue, not a Warden issue).
+
+**Known limitations.**
+
+- **File-signer single-key constraint** — same as §6: rotation drops
+  pre-rotation row verifiability. Mitigation: schedule rotations
+  during a documented forensic-gap window and call out the gap in
+  the audit log. Long-term fix: multi-key file-signer (queued
+  follow-up; see roadmap).
+- **JWKS cache TTL on the verifier side.** `warden-ledger` caches the
+  JWKS document with a short TTL (default 5 minutes). A row signed
+  under the new kid that arrives at the verifier *before* its JWKS
+  refresh will surface as `KeyNotInJwks` — distinct from `Forged`
+  but visually similar in monitoring. The cache refresh closes the
+  gap automatically; if you're verifying in CI / CLI rather than the
+  long-running ledger process, force a fresh fetch.
