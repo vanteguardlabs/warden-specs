@@ -1755,7 +1755,7 @@ Companion to [Layer 2 — warden-brain](#layer-2--warden-brain) (sub-second clas
 
 **This service does not gate live traffic.** HIL is the inline blocking surface; deep-review is retrospective by design. A vendor outage, a quota burst, or a slow review must never back up the audit stream and starve brain → ledger writes. Every failure mode soft-fails per event with a queryable sentinel.
 
-**Module status:** **shipped 2026-05-13** at `warden-specs/VERSION` 0.6.0. Lives in `warden-deep-review` (new repo, NATS consumer + LLM provider trait + per-agent history ring buffer + budget + retry + alert sink), wired into `warden-e2e/{prod,dev}/docker-compose.yml` as a service in the `stack` profile. **Adjacent surfaces deferred:** `/deep-review` console route, `warden-charts/` Helm values, baseline-accuracy benchmark publication.
+**Module status:** **shipped 2026-05-13** at `warden-specs/VERSION` 0.6.0. Lives in `warden-deep-review` (new repo, NATS consumer + LLM provider trait + per-agent history ring buffer + budget + retry + alert sink), wired into `warden-e2e/{prod,dev}/docker-compose.yml` as a service in the `stack` profile, and into `warden-charts/charts/warden/` as `services.deepReview` (shipped 2026-05-14 at version 0.7.0; chart covers the full eight-service stack). **Adjacent surfaces deferred:** published baseline-accuracy benchmark against real Opus.
 
 ### 1. What this closes
 
@@ -1917,7 +1917,6 @@ The masker is deliberately small. A future v1.x+1 task is to swap it for the mor
 
 **Deferred (callout — see roadmap §"v1.x+1"):**
 
-- Helm chart values under `warden-charts/` for K8s sidecar deployments — folded into the umbrella-chart scaffold work since the repo is currently a README stub.
 - Published baseline-accuracy benchmark number against real Opus (operator-run; the in-CI benchmark uses `MockProvider`).
 
 ### 9. Test surface

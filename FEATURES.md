@@ -1769,6 +1769,26 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.11 v0.7.0 ship log (2026-05-14)
+
+Umbrella Helm chart (B9) — the chart at `warden-charts/charts/warden/`
+now covers the full eight-service production deployment (proxy +
+brain + policy-engine + ledger + hil + identity + deep-review +
+console). The slice-2 HA-story skeleton in `warden-e2e/charts/warden/`
+was promoted to `warden-charts/`, extended with the two new services
++ NetworkPolicy perimeter + PodDisruptionBudget + proxy mTLS Secret
+mount, then removed from `warden-e2e/` so the chart has one
+canonical source. Chart version 0.2.0, `appVersion: "0.7.0"`.
+
+- **Eight services** — Deployment + Service per `services.<name>` in `values.yaml`. SQLite-pinned services (ledger / hil / identity) keep `replicas: 1` + PVC; Postgres mode lifts the ledger pin with `WARDEN_LEDGER_BACKEND=postgres`.
+- **Backend URL envs** wired by component via a `warden.backendEnvs` helper — proxy gets brain/policy/hil/identity, console gets ledger/hil/policy-engine/identity, deep-review gets ledger, identity gets `WARDEN_IDENTITY_CA_DIR=/certs`.
+- **`networkPolicy.enabled: true`** emits per-service NetworkPolicies — backend services accept ingress only from proxy + console + deep-review (matched by `app.kubernetes.io/component` label on the same `app.kubernetes.io/instance`). Front-door services (proxy + console) keep open ingress (mTLS / auth gate). Optional Prometheus-namespace allowance via `networkPolicy.prometheusNamespaceLabel`.
+- **`podDisruptionBudget.enabled: true`** (default) auto-emits a PDB whenever a service has `replicas > 1` with `minAvailable = ceil(replicas/2)`. SQLite-pinned services skip naturally; once an operator flips ledger to Postgres mode + `replicas: 3`, a PDB lands without any chart change.
+- **`proxyTls.secretName`** mounts a k8s Secret with the four PEMs (ca.pem / server.pem / server.key / client.pem / client.key) read-only on both proxy and identity Deployments at `/certs` (default `proxyTls.mountPath`). Empty → no mount; the proxy will panic at boot per the recurring-gotchas note in `CLAUDE.md`. NOTES.txt prints a warning when unset.
+- **CI** — new `.github/workflows/ci.yml` runs `helm lint` + `helm template` against three value combos (default / all-on / postgres-mode) + a smoke-check that each render emits ≥8 Deployments + kubeconform validation. Pinned `azure/setup-helm@v4`, `actions/checkout@v4`, `actions/setup-go@v5`.
+- **Spec hygiene** — `TECH_SPEC.md` §"Forensic-tier deep review" §"Module status" updated: chart wiring is no longer deferred (deep-review lands as `services.deepReview` in the umbrella chart). §8 "Deferred" trimmed: chart-values bullet removed, baseline-accuracy benchmark remains.
+- **Adjacent cleanups** — `warden-e2e/charts/warden/` files removed (`git rm`), replaced with a one-page `charts/README.md` pointer at the new location. `warden-e2e/.github/workflows/ci.yml`'s `helm + kubeconform` job dropped — the warden-charts repo now owns chart CI.
+
 ---
 
 ## 15. Forensic-tier deep review
