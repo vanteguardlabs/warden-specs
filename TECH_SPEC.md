@@ -128,7 +128,9 @@ No JSON in queryable columns where it can be a column — we want SQL-grep-able 
 
 #### 4.3 Keys
 
-Issuer keys live in **Vault Transit** (Warden already runs Vault for credential injection). The identity service never holds private key material in-process — it calls `transit/sign/<key>` over the existing Vault client. Rotation is Vault-driven.
+Issuer keys live in **Vault Transit** by default (Warden already runs Vault for credential injection). The identity service never holds private key material in-process — it calls `transit/sign/<key>` over the existing Vault client. Rotation is Vault-driven.
+
+**Alt-backend for OSS / `warden-lite`** (added v0.6.6): a file-loaded Ed25519 signer is available behind the same `Sign` trait for deployments that don't run Vault. Opt-in via `WARDEN_IDENTITY_SIGNING_KEY_PATH=/path/to/key.pem` (PKCS#8 PEM); the key sits in process memory for the life of the binary. Vault takes precedence when both are configured; the file path is selected only when Vault env vars are unset. Operator setup: `openssl genpkey -algorithm ed25519 -out warden-identity.key && chmod 600 warden-identity.key`. The trade-off vs. Vault is "operational simplicity (no Vault dep) vs. compromise blast radius (key bytes in process)". The wire envelope (`vault:v1:<base64>`) is preserved by both backends so the ledger verifier's strip path stays unchanged; the JWKS `kid` (`warden-identity-file:v1` by default, override via `WARDEN_IDENTITY_SIGNING_KEY_ID`) distinguishes the backend for audit-row triage.
 
 ### 5. Action signing & ledger anchoring
 
@@ -2291,16 +2293,22 @@ operator actions are anchored.
 
 #### Information disclosure
 
-Private keys never leave Vault. `warden-identity` holds no private
+Private keys never leave Vault on the production path. `warden-identity` holds no private
 key material in-process: every signature goes out over the `vaultrs`
 client to Vault Transit (`transit/sign/<key>`). The identity service's
 own surface exposes only public material — JWKS at `GET /jwks.json`
 and the federation bundle at `GET /.well-known/spiffe-bundle`. A
 compromise of the identity host doesn't compromise the signing key;
 rotating the issuer is a `vault write -f transit/keys/<name>/rotate`,
-not a Warden code path. An OSS / `warden-lite` alt-backend that loads
-an in-process Ed25519 keypair from a file (so a small deployment can
-skip Vault) is queued as v1.x+1 work — see roadmap entry B13.
+not a Warden code path. The OSS / `warden-lite` alt-backend
+(`Ed25519FileSigner`, shipped v0.6.6) deliberately trades this
+property for operational simplicity — it loads a PKCS#8 PEM key from
+`WARDEN_IDENTITY_SIGNING_KEY_PATH` and holds it in process memory.
+Operators choosing the file backend should treat the host as
+sensitive (read-protected key file, no debug shell access, audited
+container build) since a host compromise leaks the signing key.
+Vault Transit remains the recommended posture for any deployment
+running multi-replica or handling regulated workloads.
 
 #### Denial of service
 
@@ -2664,7 +2672,9 @@ A2A traffic rejecting with `peer_bundle_unknown` /
    themselves have outaged their bundle endpoint, this is a
    cross-tenant escalation.
 
-**Verification.** Proxy logs `identity wired to Vault Transit signer`
+**Verification.** Identity logs `identity wired to Vault Transit signer`
+(or `identity wired to file-loaded Ed25519 signer (WARDEN_IDENTITY_SIGNING_KEY_PATH) — OSS / warden-lite path`
+when running the alt-backend)
 and stops emitting `_unavailable` warnings; chain v2 rows resume in
 the ledger; `/svid` issues a fresh SVID end-to-end (test with the
 chaos-monkey `attestation_signed` scenario).

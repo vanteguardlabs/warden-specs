@@ -420,7 +420,7 @@ Out-of-envelope scope returns 403 with `{"error":"scope_outside_envelope","offen
 
 **Concept.** After the security verdict resolves, the proxy asks `warden-identity` to sign it. The signature is the legal proof that "Warden, at this timestamp, with this verdict, processed this request from this agent." The chain row carries `signature + key_id` alongside the verdict; a regulator with `manifest.sig` + the issuer JWKS can independently verify every row.
 
-**Implementation.** `POST /sign` on identity, body `{ correlation_id, method, prev_hash, payload_canonical_json }`, header `X-Caller-Spiffe` matched against `WARDEN_IDENTITY_SIGN_ALLOWED_CALLERS`. Returns `{ signature, key_id, signed_at }`. Ed25519 keys held in-process (loaded from `WARDEN_IDENTITY_SIGNING_KEY_PATH` at boot, exposed only as JWKS public material). Signing budget: p95 < 5ms.
+**Implementation.** `POST /sign` on identity, body `{ correlation_id, method, prev_hash, payload_canonical_json }`, header `X-Caller-Spiffe` matched against `WARDEN_IDENTITY_SIGN_ALLOWED_CALLERS`. Returns `{ signature, key_id, signed_at }`. Two backends behind the same `Sign` trait: **Vault Transit** (default — private key stays in Vault, `vaultrs` client makes the `transit/sign` call) and **`Ed25519FileSigner`** (OSS / warden-lite — loads PKCS#8 PEM from `WARDEN_IDENTITY_SIGNING_KEY_PATH`, signs with `ed25519-dalek` directly). JWKS at `/jwks.json` exposes only public material either way. Signing budget: p95 < 5ms.
 
 **Verify.**
 
@@ -1705,7 +1705,7 @@ The 2026-05-13 spec audit (recorded in `/home/debian/claude/.claude/plans/replic
 - **HIL `WARDEN_HIL_DECIDE_TOKEN` per-request validation** — *Spec softened in v0.6.3* (Operator-auth §6); boot-time validation queued as roadmap entry B12.
 - **Non-`text/*` body on `/export/regulatory` returns 400, not silently dropped** — *Fixed in spec v0.6.3* (Regulatory §10).
 - **Action signing uses `GENESIS_PREV_HASH` placeholder, not ledger tail** — *Documented in spec v0.6.3* (Identity §5.2 carries the deviation note + integrator guidance).
-- **Identity signing is Vault Transit only, not file-loaded Ed25519** — Threat-model §"warden-identity" had claimed in-process Ed25519 keypairs loaded from `WARDEN_IDENTITY_SIGNING_KEY_PATH`; reality is `vaultrs` to Vault Transit. *Spec softened in v0.6.3*; alt-backend (file-loaded Ed25519 for warden-lite/OSS) queued as roadmap entry B13.
+- **Identity signing is Vault Transit only, not file-loaded Ed25519** — Threat-model §"warden-identity" had claimed in-process Ed25519 keypairs loaded from `WARDEN_IDENTITY_SIGNING_KEY_PATH`; reality is `vaultrs` to Vault Transit. *Spec softened in v0.6.3*; alt-backend shipped 2026-05-14 (v0.6.6) as `Ed25519FileSigner` (§14.8).
 - **Deep-review PII sentinel names** — Spec said `[PEM]` / `[AWS_KEY]`; code emits `[PEM_PRIVATE_KEY]` / `[AWS_ACCESS_KEY_ID]`. *Fixed in spec v0.6.3* (Forensic-tier deep review §7).
 - **Deep-review env-var table missing three knobs** — `WARDEN_DEEP_REVIEW_NATS_URL`, `_FORENSIC_SUBJECT`, `_FINDINGS_SUBJECT` were in code but not in spec table. *Fixed in spec v0.6.3* (Forensic-tier deep review §5).
 - **Deep-review `/deep-review` console route + narrative strip shipped** — Spec §8 still listed under "Deferred". *Fixed in spec v0.6.3* — now under "Shipped" with v0.6.1 + v0.6.2 commit pointers.
@@ -1748,6 +1748,13 @@ Five v1.x+1 polish items shipped in lockstep on the 2026-05-13 quick-wins blitz.
 - **`warden_hil_avg_latency_seconds` metric** — `POST /decide/{id}` is wrapped with an RAII `DecideLatencyGuard` that records on every exit (success + error). Registered via `metrics::describe_histogram!` in `warden-hil/src/main.rs`. Runbooks already cited the name; it now actually exports. Prometheus average is `rate(_sum)/rate(_count)`.
 - **`WARDEN_HIL_REQUIRE_DECIDE_TOKEN` boot guard** — opt-in env var. When set to `true`/`1`, HIL refuses to boot unless `WARDEN_HIL_DECIDE_TOKEN` is also set. Validation lives in `auth::validate_decide_token_requirement` (pure function so tests don't touch `std::env`). Matches the original spec promise softened in v0.6.3 (`TECH_SPEC.md#operator-authentication` §6).
 - **Two chaos-monkey supply-chain scenarios** — `malicious_code_reverse_shell` (`write_file` tool + classic reverse-shell needle from brain's `MALICIOUS_CODE_NEEDLES`) and `compromised_package_install` (`execute_command` tool + `pip install jeIlyfish` — a PyPI typosquat in brain's bundled `compromised_packages.json`). New `Category::SupplyChain` variant. Both expect deny verdicts via brain's signal-fold `BLOCK: <signal>…` override.
+
+### 14.8 v0.6.5 — v0.6.6 ship log (2026-05-13 / 2026-05-14)
+
+Two further v1.x+1 items closed after the v0.6.4 quick-wins blitz. Spec text updated in the same commits.
+
+- **`--delegation-mix` simulator flag (v0.6.5)** — `warden-simulator/src/delegation.rs`. Comma-separated principal pool stamped per fire as an unsigned `X-Warden-Grant` JWT. Proxy treats unsigned grants as advisory metadata (`warden-proxy/src/grant.rs` v1 trust model). Console `/audit` now renders varied "Delegation: alice@acme via cs-bot-1" badges. Compose default: `alice@acme.com,bob@acme.com,carol@globex.com,dana@globex.com`. See §14.2.
+- **`Ed25519FileSigner` alt-backend (v0.6.6)** — second `Sign` impl in `warden-identity/src/signer.rs` for OSS / warden-lite deployments that skip Vault. Loads a PKCS#8 PEM key from `WARDEN_IDENTITY_SIGNING_KEY_PATH`, signs with `ed25519-dalek` directly, publishes the SPKI public PEM at `/jwks.json`. Wire envelope (`vault:v1:<base64>`) shared with the Vault path so the ledger verifier strip stays unchanged; `kid` (`warden-identity-file:v1` default, override via `WARDEN_IDENTITY_SIGNING_KEY_ID`) distinguishes the backend. Vault wins when both env vars are set — production posture unchanged. Security trade-off documented in `TECH_SPEC.md#threat-model` §"warden-identity" §Information disclosure: file backend trades "key out of process" for "no Vault dep" and is recommended only for single-replica OSS deployments.
 
 ---
 
