@@ -1769,6 +1769,17 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.24 v0.9.3 ship log (2026-05-14)
+
+B8 session 3b — proxy outbound-side adoption. All five outbound s2s paths (brain, policy-engine, hil, identity signing, A2A) now use the `warden-workload-identity` hot-reloading client instead of the legacy `OutboundTls` path-bundle.
+
+- **`warden-workload-identity` gains outbound client hot-reload.** `client_swap: Arc<ArcSwap<reqwest::Client>>` added to `WorkloadIdentity`. Pre-built from the bootstrap cert at `from_env` time; the refresh task rebuilds and atomically swaps the Client after every successful workload-SVID mint. Consumers call `wi.reqwest_client()` per outbound request — one `Arc::clone`, zero TLS rebuilds on the hot path.
+- **`OutboundTls` removed from `warden-proxy`.** `fork::LayerClient`, `sign::SigningClient`, `a2a::A2aClient`, and the HIL poll path (`state.outbound_client()`) all replaced their `reqwest::Client` field with `wi: Option<Arc<WorkloadIdentity>>` + `fallback_http: Arc<reqwest::Client>`. `Some(wi)` → hot-reloading mTLS; `None` → plain HTTPS (tests, dev runs without `WARDEN_PROXY_TLS_DIR`). Per-call timeouts via `tokio::time::timeout` moved into each callsite since the shared Client carries no embedded timeout.
+- **`AppState::outbound_client()` helper.** New convenience method on `AppState` that returns `wi.reqwest_client()` or `fallback_http.clone()` — keeps the HIL poll path (`handler/hil.rs`) clean of the `match wi` pattern.
+- **Dockerfile updated.** `COPY --from=warden-workload-identity` named-context pattern added alongside the existing `warden-sandbox` copy. Build comment updated to document both `--build-context` flags.
+- **Compose env updated.** Both dev + prod proxy service blocks: `warden-workload-identity` added to `additional_contexts`; `WARDEN_PROXY_OUTBOUND_{CERT,KEY,CA}_PATH` removed; replaced with `WARDEN_PROXY_TLS_DIR=/certs`, `WARDEN_PROXY_WORKLOAD_REFRESH_URL=https://identity:8186/workload-svid`, `WARDEN_PROXY_EXPECTED_PEER_SPIFFE` (brain, policy-engine, hil, identity).
+- **cargo check + clippy + tests green.** No warnings; all 6 integration tests pass.
+
 ### 14.23 v0.9.2 ship log (2026-05-14)
 
 B8 session 3a — receive-side adoption: `warden-brain` and `warden-policy-engine` switch their inbound mTLS listeners from a static `RustlsConfig::from_pem` build to the helper's hot-reloading `WorkloadIdentity::rustls_server_config()`. Proxy outbound-side adoption is its own follow-on (session 3b → v0.9.3).
