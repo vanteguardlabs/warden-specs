@@ -1769,6 +1769,14 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.22 v0.9.1 ship log (2026-05-14)
+
+B8 session 2 polish — silence the boot-time refresh race in `warden-workload-identity`.
+
+- **First-attempt retries.** The background refresh task spawned ~0.5 ms before the mTLS listener finished binding, so every identity restart produced a spurious `WARN workload SVID refresh: first attempt failed; staying on bootstrap`. First attempt now goes through the same `refresh_with_retries` budget (`1s/4s/16s`) the steady-state loop uses — second attempt typically catches the listener already up.
+- **Per-attempt failure logs downgraded.** Each retry's failure was warning at WARN; transient retry noise now lands at DEBUG. A genuine outage still surfaces: the loop emits one WARN when the full budget is exhausted (the operator-relevant signal).
+- **Behaviour change is zero on the happy path** — the workload SVID lands one boot earlier and the chain row count is identical. Bumped patch (0.9.0 → 0.9.1) per the convention.
+
 ### 14.21 v0.9.0 ship log (2026-05-14)
 
 B8 session 2 — workload-SVID refresh helper crate, `/workload-svid` endpoint, chain-v3 `svid.workload_refreshed` event. Identity is the first caller of its own refresh path; proves the no-cold-start cycle that sessions 3–5 will cascade across the stack.
