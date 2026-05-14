@@ -1769,6 +1769,14 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.12 v0.7.1 ship log (2026-05-14)
+
+Design-record entry — no implementation code. Captures the agreed substrate for internal service-to-service mTLS (roadmap B7) so the wire contract is pre-agreed when the implementation lands across the next six sessions.
+
+- **`TECH_SPEC.md` §"Internal service mTLS"** (new section) records: hops in scope (proxy → brain/policy/hil/identity + console → backends + deep-review → ledger), three substrates considered (warden-identity SVIDs CHOSEN, service-mesh REJECTED, static-rolled-CA absorbed as bootstrap), wire shape with `spiffe://warden.local/service/<name>` URIs + SAN allowlist, bootstrap pattern (long-lived deploy-time cert under the existing warden CA root), helm-chart evolution (`proxyTls.secretName` → `tlsBundle.secretName`), out-of-scope (NATS TLS split to B7.5; `warden-lite` has no internal hops), six-session implementation roadmap, four open questions with default leans.
+- **Pointer cleanup** — the three "deferred service-mesh work" markers in `TECH_SPEC.md` (operator-auth §6, threat-model §"Layer 2 — warden-brain", threat-model §"Layer 5 — warden-deep-review", and threat-model "Open items" table) all updated to point at the new section. No stale "service-mesh work" references remain in the spec.
+- **Reject reasoning recorded** — service mesh is rejected as warden's *trust root* because (i) compose dev stack has no mesh; (ii) `warden-lite` and bare-VM deploys cannot carry one; (iii) chain v2/v3 signing wants application-level identity, not pod-level mesh identity. Operators may still layer a mesh on top — warden is mesh-agnostic.
+
 ### 14.11 v0.7.0 ship log (2026-05-14)
 
 Umbrella Helm chart (B9) — the chart at `warden-charts/charts/warden/`
