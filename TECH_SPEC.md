@@ -2557,42 +2557,61 @@ credential, bootstrap as fallback only."
   revocation feed is the B1 follow-up (proxy-side denylist
   consumption) and lives in its own slice.
 
-### 11. Open questions (lock in session 2)
+### 11. Decided 2026-05-14
 
-1. **SDK helper location: `warden-sdk::mtls` vs new
-   `warden-workload-identity` crate.** Both work; default
-   recommendation is Option B (clean module boundary).
-2. **Default `ttl_seconds`: 900s (15min), 1800s (30min), or
-   3600s (60min).** Trade-off is refresh load on identity vs.
-   revocation effectiveness window. Recommendation: 1800s
-   matches the bottom of the "≤1h" agent SVID ceiling, halves
-   the leak window vs. agents, and keeps identity at < 1 RPS
-   even with 10+ services.
-3. **Refresh window: 50% remaining TTL (recommendation), 75%,
-   or operator-configurable.** A 50% window gives one
-   complete retry cycle before expiry; 75% adds slack for a
-   long identity outage.
-4. **Chain v3 event sampling.** Every refresh in normal
-   operation produces a row — at 1800s default + 10 services,
-   that's ~480 rows/day. Acceptable for the demo VPS; possibly
-   noisy at scale. Options: emit every refresh (recommendation
-   for v1; observability wins), sample every Nth, or emit only
-   on `caller_kind=bootstrap` transitions (proves rotation
-   propagation without per-refresh chatter).
-5. **Client-side check rollout posture.** Hard-flip to enforce
-   in session 5 (recommendation — staged warn-mode runs in
-   sessions 3+4 give every service one full session of
-   warn-only telemetry before enforce) vs. permanent
-   warn-mode + opt-in enforce.
-6. **NATS-client SVID adoption.** NATS clients reuse the
-   workload SVID for the handshake; the NATS server itself
-   stays on the bootstrap cert (§2). Confirm acceptable in
-   session 2; alternative is leaving NATS-client side on
-   bootstrap too, simplifying the slice but losing G1
-   coverage on the NATS leg.
+The six originally-open questions are answered below — sessions 2–5
+proceed against these.
 
-§11 answers will be inlined in §10-style "Decided" prose at the
-top of session 2's commit, mirroring the v1.x+2 §10 pattern.
+1. **SDK helper location: new crate `warden-workload-identity`.**
+   Cleaner module boundary than folding mTLS plumbing into
+   `warden-sdk` (which stays integrator-facing). Every workspace
+   service that already speaks mTLS gains one path-dep on the new
+   crate; no widening of `warden-sdk`'s public surface. Trade-off
+   is one more crate in the workspace; that cost is one-time and
+   small relative to the surface-area win.
+2. **Default `ttl_seconds`: 1800s (30min).** Halves the leak
+   window relative to the "≤1h" agent SVID ceiling without
+   crossing into territory where identity becomes the hot path
+   (10 services × every-15-minutes-on-the-low-end would hit
+   ~50 RPS at burst; 30min cadence keeps steady-state under
+   1 RPS).
+3. **Refresh window: 50% of remaining TTL.** Refresh fires at
+   `current.not_after - ttl_target/2`, giving one full
+   retry cycle (`1s/4s/16s` jitter + sweep budget) before
+   `current` expires. 75% would burn through the retry window
+   on the first failure; operator-configurable buys flexibility
+   we don't need at v1.
+4. **Chain v3 event sampling: emit every refresh.** ~480 rows/
+   day at default cadence with 10 services. Acceptable for the
+   demo VPS; the operator-relevant `caller_kind` field surfaces
+   the "stuck on bootstrap" signal a sampled stream would lose.
+   If the row volume becomes load-bearing at scale, sampling
+   is a follow-up tunable rather than a wire-contract change.
+5. **Client-side SPIFFE check rollout: warn-mode in sessions
+   2–4, hard-flip to enforce in session 5.** Two full sessions
+   of warn-only telemetry across every outbound caller (proxy,
+   brain, policy-engine in session 3; ledger, hil, console,
+   simulator, deep-review, demo-mint in session 4) before the
+   posture flip. A bad `WARDEN_<SVC>_EXPECTED_PEER_SPIFFE`
+   value fails open during warn-mode, loud-logs the mismatch,
+   and the operator fixes it ahead of the flip. Cheaper than
+   debugging a "stack didn't come up after upgrade" during the
+   session-5 rollout.
+6. **NATS-client SVID adoption: reuse the workload SVID for
+   the NATS handshake.** Closes G1 on the NATS leg without
+   adding a NATS-specific code path — the same `current` cert
+   the helper hands to reqwest is what the NATS client passes
+   to `async-nats::ConnectOptions::add_client_certificate`.
+   NATS *server* stays on the 1-year bootstrap cert (§2);
+   server-side SVID would need NATS cert hot-reload which
+   doesn't exist without dropping client connections.
+
+These locks shape the implementation surface for session 2:
+new crate, `POST /workload-svid` with `MAX_TTL_SECONDS=3600`
+and default `1800`, refresh at `remaining/2`, every-mint
+chain v3 emission, warn-mode `ServerCertVerifier` in the
+client side of the helper, NATS-client `add_client_certificate`
+sourced from `current.load()`.
 
 ---
 
