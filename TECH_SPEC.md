@@ -1959,8 +1959,9 @@ and deep-review trusting the docker network or k8s
 `NetworkPolicy` for caller authenticity, threat-model tagged under
 each layer's STRIDE "Tampering" axis — is the gap this section
 agreed to close. After session 6 the application hops are
-mTLS-gated end-to-end; the NATS transport (B7.5) is the remaining
-plain-text leg.
+mTLS-gated end-to-end; the NATS transport (B7.5) shipped in v0.8.4
+alongside the application hops — every internal leg in the stack is
+now mTLS-authenticated, no plain-text fallback remains.
 
 ### 1. Hops in scope
 
@@ -2129,11 +2130,18 @@ of the cryptographic mTLS check.
 
 ### 8. Out of scope (this section)
 
-- **NATS pub/sub TLS.** Substrate-level (`nats:2 --tls`), not
-  application-level. Tracked as roadmap follow-up **B7.5**. Doing
-  both in one cycle is too large; the application-cert work alone
-  closes the proxy↔backend forgery class, which is the bigger of
-  the two holes.
+- **NATS pub/sub TLS.** ~~Substrate-level (`nats:2 --tls`), not
+  application-level. Tracked as roadmap follow-up **B7.5**.~~
+  **Shipped v0.8.4 (2026-05-14).** NATS server binds TLS+mTLS on
+  port 4222 via `nats-server.conf` (cert: `service-nats.{crt,key}`;
+  CA: shared warden CA; `verify: true` requires every client to
+  present a workload cert). Each of the seven NATS-connecting
+  services (proxy, ledger, hil, identity, policy-engine, deep-review,
+  demo-mint) carries a small `src/nats_tls.rs` helper that reads
+  `NATS_TLS_{CERT,KEY,CA}_PATH` at boot and constructs the async-nats
+  `ConnectOptions` with `require_tls(true) + add_client_certificate +
+  add_root_certificates`. Partial config fails closed; unset triplet
+  preserves the legacy plain-TCP posture for host-cargo dev.
 - **`warden-lite`.** Single-binary OSS edition has no internal hops
   (proxy + ledger + sandbox all in one process). Out of scope by
   construction.
