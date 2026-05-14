@@ -1723,7 +1723,7 @@ Tracked at `TECH_SPEC.md#threat-model` "Open items":
 - ~~**Per-region key rotation runbook**~~ — *Shipped 2026-05-14 (v0.6.7)* as `TECH_SPEC.md#runbooks` §7 "Routine issuer-key rotation"; covers both Vault Transit and `Ed25519FileSigner` paths.
 - ~~**Identity-compromise runbook**~~ — *Shipped 2026-05-14 (v0.6.7)* as `TECH_SPEC.md#runbooks` §6 "Issuer-key compromise"; the prior `TODO: write that runbook` marker in the threat-model section is now resolved.
 - **Multi-tenant audit-log isolation** in console — year-2 product question.
-- **Multi-key file-signer** — surfaced by the §7 runbook: `Ed25519FileSigner` today loads exactly one PEM, so rotation drops pre-rotation row verifiability. Queued as a follow-up (extend `from_env` to accept a comma-separated PEM list, publish all of them in JWKS).
+- ~~**Multi-key file-signer**~~ — *Shipped 2026-05-14 (v0.6.8)*. `Ed25519FileSigner::from_env` now parses comma-separated path + kid lists; first entry is the active signer, the rest stay in JWKS for verification of pre-rotation rows. Closes the rotation-gap caveat in `TECH_SPEC.md#runbooks` §7.
 
 ### 14.6 Acknowledged future work (spec-level)
 
@@ -1756,6 +1756,10 @@ Two further v1.x+1 items closed after the v0.6.4 quick-wins blitz. Spec text upd
 
 - **`--delegation-mix` simulator flag (v0.6.5)** — `warden-simulator/src/delegation.rs`. Comma-separated principal pool stamped per fire as an unsigned `X-Warden-Grant` JWT. Proxy treats unsigned grants as advisory metadata (`warden-proxy/src/grant.rs` v1 trust model). Console `/audit` now renders varied "Delegation: alice@acme via cs-bot-1" badges. Compose default: `alice@acme.com,bob@acme.com,carol@globex.com,dana@globex.com`. See §14.2.
 - **`Ed25519FileSigner` alt-backend (v0.6.6)** — second `Sign` impl in `warden-identity/src/signer.rs` for OSS / warden-lite deployments that skip Vault. Loads a PKCS#8 PEM key from `WARDEN_IDENTITY_SIGNING_KEY_PATH`, signs with `ed25519-dalek` directly, publishes the SPKI public PEM at `/jwks.json`. Wire envelope (`vault:v1:<base64>`) shared with the Vault path so the ledger verifier strip stays unchanged; `kid` (`warden-identity-file:v1` default, override via `WARDEN_IDENTITY_SIGNING_KEY_ID`) distinguishes the backend. Vault wins when both env vars are set — production posture unchanged. Security trade-off documented in `TECH_SPEC.md#threat-model` §"warden-identity" §Information disclosure: file backend trades "key out of process" for "no Vault dep" and is recommended only for single-replica OSS deployments.
+
+### 14.10 v0.6.8 ship log (2026-05-14)
+
+- **Multi-key `Ed25519FileSigner` (B14)** — `warden-identity/src/signer.rs`. `from_env` now accepts comma-separated `WARDEN_IDENTITY_SIGNING_KEY_PATH` + matching-length comma-separated `WARDEN_IDENTITY_SIGNING_KEY_ID`; the first entry signs, the rest publish in JWKS for pre-rotation row verification. Boot rejects empty pools, duplicate kids, mismatched list lengths, and multi-path without explicit kids (so a rotation that forgets to bump the kid env can't silently regress). 6 new tests including the load-bearing one: a signature produced by `v1` before rotation still verifies via JWKS after rotating to `v2,v1`. Closes the file-signer rotation gap called out in v0.6.7's §7 runbook; that runbook's known-limitations section is correspondingly trimmed.
 
 ### 14.9 v0.6.7 ship log (2026-05-14)
 

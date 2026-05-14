@@ -130,7 +130,7 @@ No JSON in queryable columns where it can be a column — we want SQL-grep-able 
 
 Issuer keys live in **Vault Transit** by default (Warden already runs Vault for credential injection). The identity service never holds private key material in-process — it calls `transit/sign/<key>` over the existing Vault client. Rotation is Vault-driven.
 
-**Alt-backend for OSS / `warden-lite`** (added v0.6.6): a file-loaded Ed25519 signer is available behind the same `Sign` trait for deployments that don't run Vault. Opt-in via `WARDEN_IDENTITY_SIGNING_KEY_PATH=/path/to/key.pem` (PKCS#8 PEM); the key sits in process memory for the life of the binary. Vault takes precedence when both are configured; the file path is selected only when Vault env vars are unset. Operator setup: `openssl genpkey -algorithm ed25519 -out warden-identity.key && chmod 600 warden-identity.key`. The trade-off vs. Vault is "operational simplicity (no Vault dep) vs. compromise blast radius (key bytes in process)". The wire envelope (`vault:v1:<base64>`) is preserved by both backends so the ledger verifier's strip path stays unchanged; the JWKS `kid` (`warden-identity-file:v1` by default, override via `WARDEN_IDENTITY_SIGNING_KEY_ID`) distinguishes the backend for audit-row triage.
+**Alt-backend for OSS / `warden-lite`** (added v0.6.6, multi-key in v0.6.8): a file-loaded Ed25519 signer is available behind the same `Sign` trait for deployments that don't run Vault. Opt-in via `WARDEN_IDENTITY_SIGNING_KEY_PATH=/path/to/key.pem` (PKCS#8 PEM); the key sits in process memory for the life of the binary. Vault takes precedence when both are configured; the file path is selected only when Vault env vars are unset. Operator setup: `openssl genpkey -algorithm ed25519 -out warden-identity.key && chmod 600 warden-identity.key`. The trade-off vs. Vault is "operational simplicity (no Vault dep) vs. compromise blast radius (key bytes in process)". The wire envelope (`vault:v1:<base64>`) is preserved by both backends so the ledger verifier's strip path stays unchanged; the JWKS `kid` (`warden-identity-file:v1` by default, override via `WARDEN_IDENTITY_SIGNING_KEY_ID`) distinguishes the backend for audit-row triage. Multi-key rotation: comma-separated paths + matching-length comma-separated kids — first becomes the active signer, the rest stay in JWKS so verifiers can still validate pre-rotation chain rows. See [Runbooks](#runbooks) §7 for the rotation procedure.
 
 ### 5. Action signing & ledger anchoring
 
@@ -2746,15 +2746,18 @@ impossible, then deal with the leaked credential.
    step 5 is the audit pass that distinguishes legitimate-old-key
    rows from forged ones.
 
-   File-signer path (single replica recommended — see Known limitations):
+   File-signer path:
    ```sh
    # On a clean host (NOT the compromised one — assume that's poisoned):
    openssl genpkey -algorithm ed25519 -out /etc/warden/identity.v2.key
    chmod 600 /etc/warden/identity.v2.key
 
-   # Update deployment env to point at the new key + bump the kid:
-   #   WARDEN_IDENTITY_SIGNING_KEY_PATH=/etc/warden/identity.v2.key
-   #   WARDEN_IDENTITY_SIGNING_KEY_ID=warden-identity-file:v2
+   # Multi-key list: v2 active for new signatures, v1 retained in
+   # JWKS so verifiers can still check pre-rotation rows. After the
+   # audit pass in step 4 you can decide whether to drop v1 from the
+   # list (forensic-gap event) or keep it forever (chain integrity).
+   #   WARDEN_IDENTITY_SIGNING_KEY_PATH=/etc/warden/identity.v2.key,/etc/warden/identity.v1.key
+   #   WARDEN_IDENTITY_SIGNING_KEY_ID=warden-identity-file:v2,warden-identity-file:v1
 
    kubectl rollout restart deploy/warden-identity
    ```
@@ -2830,16 +2833,6 @@ the rotation now references a kid you've effectively retired.
 
 **Known limitations.**
 
-- **File-signer rotation breaks verification of pre-rotation rows.**
-  `Ed25519FileSigner` today loads exactly one key file and publishes
-  exactly one public key in JWKS — there's no provision for keeping
-  the old key online for verification while the new key is the active
-  signer. Operators on the file backend should treat compromise
-  rotation as a deliberate forensic-gap event and document the gap
-  in the incident report. The Vault path doesn't have this issue.
-  Tracked as a follow-up: multi-key file-signer (extend
-  `Ed25519FileSigner::from_env` to accept a comma-separated list of
-  PEMs so old versions stay in JWKS during rotation).
 - **The chain itself is append-only.** Tampered rows can't be
   repaired, only flagged. The report should call out exact `seq`
   ranges so a downstream consumer can decide whether to re-verify or
@@ -2896,40 +2889,43 @@ visible within the first `/sign` after the Vault write completes.
 openssl genpkey -algorithm ed25519 -out /etc/warden/identity.v2.key
 chmod 600 /etc/warden/identity.v2.key
 
-# 2. Update deployment env to point at the new file + bump the kid.
-#    Both env vars MUST change — leaving the kid pointing at v1
-#    publishes the new public key under an old name, which makes
-#    pre-rotation row verification ambiguous.
-#      WARDEN_IDENTITY_SIGNING_KEY_PATH=/etc/warden/identity.v2.key
-#      WARDEN_IDENTITY_SIGNING_KEY_ID=warden-identity-file:v2
+# 2. Update deployment env to a comma-separated list: new key first
+#    (becomes active for /sign), prior key second (stays online in
+#    JWKS for verification of pre-rotation rows). Both env vars must
+#    move in lockstep — list lengths are validated at boot.
+#      WARDEN_IDENTITY_SIGNING_KEY_PATH=/etc/warden/identity.v2.key,/etc/warden/identity.v1.key
+#      WARDEN_IDENTITY_SIGNING_KEY_ID=warden-identity-file:v2,warden-identity-file:v1
 
-# 3. Restart identity. File-signer reads the key once at boot;
+# 3. Restart identity. File-signer reads the key list once at boot;
 #    there is no hot-reload path today.
 kubectl rollout restart deploy/warden-identity
 
-# 4. Verify JWKS published the new public key.
-curl -s https://<identity-host>:8086/jwks.json | jq '.keys[0].kid'
-# Expected: "warden-identity-file:v2"
+# 4. Verify JWKS publishes both kids.
+curl -s https://<identity-host>:8086/jwks.json | jq '.keys[].kid'
+# Expected: ["warden-identity-file:v2", "warden-identity-file:v1"]
 ```
 
 **Mixed-version chain window.**
 
-After a Vault rotation the ledger contains rows signed under both
-the old and new versions for the lifetime of the chain (it's
-append-only). JWKS returns *all* active versions so verifiers
-verify either. **There is no retire step in routine rotation.**
-Old versions stay published indefinitely. If a compliance posture
-requires actively retiring an old version, treat as §6 — that's a
-"signal we don't trust this key anymore" event, not a routine.
+After a rotation the ledger contains rows signed under both the old
+and new versions for the lifetime of the chain (it's append-only).
+JWKS returns *all* active versions so verifiers verify either —
+Vault Transit keeps every key version online by default, and the
+file-signer's multi-key list (`v2,v1`) does the same on the OSS
+path. **There is no retire step in routine rotation.** Old versions
+stay published indefinitely. If a compliance posture requires
+actively retiring an old version, treat as §6 — that's a "signal we
+don't trust this key anymore" event, not a routine.
 
 **Verification.**
 
-- `/jwks.json` includes the new kid alongside the old (Vault path)
-  or the new kid replaces the old (file path — known limitation).
+- `/jwks.json` includes the new kid alongside the old (both Vault
+  Transit and the file-signer's multi-key list do this).
 - Three random rows newer than the rotation timestamp verify against
   the new kid: `wardenctl ledger verify --since <rotation-ts>`.
-- Three random rows from *before* the rotation also still verify
-  (Vault path only — confirms the old version is still in JWKS).
+- Three random rows from *before* the rotation also still verify —
+  this is what the retained version (Vault `v_old`, or the file
+  signer's second list entry) is for:
   ```sh
   wardenctl ledger verify --until <rotation-ts> --tail 50
   ```
@@ -2943,11 +2939,6 @@ ACL / replication issue, not a Warden issue).
 
 **Known limitations.**
 
-- **File-signer single-key constraint** — same as §6: rotation drops
-  pre-rotation row verifiability. Mitigation: schedule rotations
-  during a documented forensic-gap window and call out the gap in
-  the audit log. Long-term fix: multi-key file-signer (queued
-  follow-up; see roadmap).
 - **JWKS cache TTL on the verifier side.** `warden-ledger` caches the
   JWKS document with a short TTL (default 5 minutes). A row signed
   under the new kid that arrives at the verifier *before* its JWKS
