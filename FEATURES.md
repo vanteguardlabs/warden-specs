@@ -1769,6 +1769,48 @@ Two runbooks added to `TECH_SPEC.md#runbooks` closing the last operational gaps 
 - **Runbook §7 "Routine issuer-key rotation" (B5)** — planned-window key hygiene (annual / quarterly per security policy). Vault Transit path is `vault write -f transit/keys/warden-identity/rotate` with no pod restart; identity reads `latest_version` on every sign call so the new kid appears in `/sign` responses within one round-trip. File-signer path requires a new key file + bumped `WARDEN_IDENTITY_SIGNING_KEY_ID` + `kubectl rollout restart`. Mixed-version chain window: JWKS publishes *all* active versions indefinitely so pre-rotation rows continue to verify (Vault path); file path drops old-key verification at rotation time — known limitation.
 - **Spec hygiene** — replaced the `TODO: write that runbook as a follow-on supply-chain slice` marker in `TECH_SPEC.md` threat-model §"warden-identity" / Elevation of privilege; updated the "Open items" table entry from "Tracked as a follow-on supply-chain slice" to a pointer at the new §7 runbook; added `Multi-key file-signer` as the only follow-up the new §6 / §7 surfaced.
 
+### 14.34 v0.9.13 ship log (2026-05-15)
+
+Approve/Deny no longer lights up the page-load progress bar. Chrome users reported the thin top strip flashing on every in-row HIL mutation — visually indistinguishable from a real navigation, and unsettling on a page that wasn't actually loading anywhere new.
+
+- **Root cause.** `base.html`'s three htmx event listeners (`htmx:beforeRequest`, `htmx:afterSettle`, `htmx:responseError`) drove `#nav-progress` for *every* htmx request, including the row-level `hx-post`s on the HIL queue. Approve/Deny POSTs carry `hx-target="#hil-row-…" hx-swap="delete"` — they swap a single row, not the page — but the listener didn't differentiate.
+- **Fix.** New `isBoostedNav(evt)` helper checks `evt.detail.requestConfig.boosted`; all three listeners early-return when it's falsy. The `hx-boost`-driven nav links still light the bar (that *is* a page swap); the in-row mutations now leave it dark.
+- **Verified.** Boosted-only gate present in the served HTML on `console-demo.vanteguardlabs.com` and `console-dev.vanteguardlabs.com` at v0.9.13. Visual smoke (browser click) still requires a human — `EventSource`-style automation can't observe a thin CSS bar — but the served-HTML diff is the load-bearing piece.
+
+### 14.33 v0.9.12 ship log (2026-05-15)
+
+Hide the Simulator surface from demo visitors. The operator `/sim` page (and its four POST mutations) controls live mTLS traffic generation — a demo visitor stumbling onto it could pause / reseed the running stack out from under other evaluators. The "auth disabled" mode synthesises an Approver session for everyone, so the existing role gates can't tell a demo cookie from a real operator; this slice adds the explicit boundary.
+
+- **UI hide.** `base.html` tags the Simulator nav anchor with `id="sim-nav-link"` and the cookie-detection JS sets `[hidden]` on it when `/api/demo-session/status` reports `active=true`. The `[hidden] { display:none !important }` reset from earlier work keeps the Tailwind `inline-flex` utility from overriding the attribute.
+- **Server-side gate.** New `forbid_demo_session(&HeaderMap) -> Result<(), ConsoleError>` helper in `handlers/shared.rs` returns `ConsoleError::NotFound` whenever the `warden_demo_session` cookie is present. Wired into all five sim handlers (`sim_panel`, `sim_set_multiplier`, `sim_set_running`, `sim_set_auto_decide`, `sim_add_agents`). The 4 POST handlers gained a `HeaderMap` extractor positioned before `Form<>` (axum requires the consuming `Form` last).
+- **New `ConsoleError::NotFound` variant.** Maps to a clean `404 not found` in `IntoResponse`. 404 over 403 because the operator surface should look like a typo'd URL to a curious visitor, not a "permission denied" tell. Same posture mirrored if the same boundary is needed on other operator-only routes in the future.
+- **Tests + lint clean.** 233/233 console tests pass; `cargo clippy --all-targets -- -D warnings` clean.
+
+### 14.32 v0.9.11 ship log (2026-05-15)
+
+Turnstile siteverify on `/mint` was rejecting every CTA submission with `["invalid-input-secret"]`. Marketing-site users couldn't actually enter the demo.
+
+- **Root cause.** Compose's `warden-demo-mint` block carried `WARDEN_DEMO_MINT_TURNSTILE_SECRET=${WARDEN_DEMO_MINT_TURNSTILE_SECRET:-1x0000000000000000000000000000000AA}` — Cloudflare's "always passes" test secret. The console's marketing CTA shipped the *real* production sitekey from the same Cloudflare widget. Cloudflare's siteverify enforces the sitekey/secret pairing strictly; a test secret cannot validate a real sitekey's token.
+- **Fix.** New `warden-e2e/prod/.env` (gitignored — `.env` is covered at repo root) carries the real production secret. Compose's `${VAR:-default}` substitution now resolves to the real secret on prod boot; dev continues to fall through to the test-pair (real-pair on prod would block a `localhost` Turnstile widget in dev anyway).
+- **Verified end-to-end.** Posted a Turnstile token via the real CTA → received the demo-session JWT → URL fragment exchanged for cookie at `console-demo` → `/api/demo-session/status` returns `{"active":true}`. Headless trace stops at the human-solve step of the Turnstile widget; the rest of the chain is verified by a real browser submission.
+- **No spec change.** The Turnstile pairing has always been deployment configuration; the bug was a stale compose default, not a wire-contract change.
+
+### 14.31 v0.9.10 ship log (2026-05-15)
+
+Perf-rework follow-up to v0.9.8 — deployed prod and dev together (`deploy prod+dev to 0.9.10`) after the prior split deploys settled. No new behaviour; bumping shows the operator-facing `/version.json` actually moved, and re-verifies the window-bounded fan-out + new `idx_entries_agent_seq` index continue to land sub-second dashboard renders on a chain that grew another ~2h of simulator traffic since v0.9.9.
+
+### 14.30 v0.9.9 ship log (2026-05-15)
+
+Perf-rework follow-up to v0.9.8. Prod was rolled forward at 10:26 and dev caught up at 11:42 — the 76-minute window was deliberate: prod telemetry first, then dev once the cap-bounded fetch held under live traffic. Same code path as v0.9.8; this bump exists to mark the dev/prod re-converge as an explicit release line rather than burying it under v0.9.8's headline.
+
+### 14.29 v0.9.8 ship log (2026-05-15)
+
+Console rate dashboards (`/velocity`, `/stats/deny-rate`, `/stats/intents`, `/stats/cost-latency`) stop pulling every chain row for every agent. Before: `fan_out_audit_agent` issued one `audit_agent` per known agent and let `try_join_all` collapse the latency to the slowest call — but each call still streamed full history, on a prod chain holding ~50k rows/agent. Measured at 3-7s of dashboard latency, mostly transport-bound. After: a `fan_out_audit_agent_recent(ids, cap)` helper issues `audit_agent_paged(id, cap, 0)` (newest-first, bounded) — the in-process timestamp filter still sees a complete window.
+
+- **Two per-window caps.** `VELOCITY_FETCH_CAP=500` for the 60s rate / 1h trip windows on `/velocity` (a peak simulator agent fits in <200 rows over 1h; 3× headroom). `DAY_WINDOW_FETCH_CAP=10000` for the 24h dashboards (`/stats/deny-rate`, `/stats/intents`, `/stats/cost-latency`) — covers ~3.5k rows/agent/day peak with the same ~3× headroom.
+- **New ledger index.** `idx_entries_agent_seq ON entries(agent_id, seq DESC)` in both `warden-ledger/src/schema.rs` (SQLite) and `src/storage/postgres.rs` so the underlying `?order=desc&limit=N` query against the chain is index-served, not a full table scan. `CREATE INDEX IF NOT EXISTS` applies once on next boot — verified live: both `warden-prod` and `warden-dev` ledger DBs carry the index.
+- **Long-term plan.** A `?since=<ts>` query param on `audit_agent` would tighten this further (cap the row count *and* skip everything older than the window cutoff). The cap is the pragmatic interim; the row cap × cap-headroom multiplier sits well above the largest known agent's 24h volume so the in-process filter doesn't silently truncate the window.
+
 ### 14.28 v0.9.7 ship log (2026-05-14)
 
 B8 hotfix — workload SVIDs need DNS SAN entries. Latent since v0.9.2 (session 3a) but only surfaced today when actual user traffic hit a workload-cert-serving listener. The user reported a 500 on the prod landing page; root cause was that every service which adopted the helper's `rustls_server_config` (ledger, hil, brain, policy-engine) serves a workload SVID whose only SAN was `URI:spiffe://…`. rustls's `WebPkiServerVerifier` rejected with `NotValidForName` because the server's cert lacked a `DNS:` entry matching the connect target (`https://<service>:port`). The error propagated through `SpiffeServerVerifier::verify_server_cert` via `?` *before* the SPIFFE URI check ran, so warn-mode never had any effect — it always failed. Identity dodged it because its receive-side uses a legacy `build_server_config` and keeps serving the bootstrap cert (which has DNS SANs).
