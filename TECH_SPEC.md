@@ -8,6 +8,7 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 
 - [Identity service](#identity-service) — SVID issuance, OIDC delegation, action signing, attestation, federation
 - [Agent onboarding (WAO)](#agent-onboarding-wao) — registration, capability envelope, lifecycle, chain v3
+- [Tenancy scope](#tenancy-scope) — what is tenant-isolated today vs. deployment-wide in v1
 - [Console config page](#console-config-page) — `/config` diagnostic surface
 - [Operator authentication](#operator-authentication) — console + HIL human auth, RBAC, cross-channel identity
 - [Regulatory export](#regulatory-export) — EU AI Act Article 11/12 audit bundle
@@ -737,6 +738,48 @@ The shared types are duplicated on each side of the wire (no shared crate, per r
 - **WebAuthn approver auth on lifecycle transitions.** Today's auth is OIDC-only on `/agents`. Step-up auth for high-impact transitions (decommission, widen) is a separate WebAuthn workstream; this spec only ensures the transitions are signed in the chain. WebAuthn lands independently.
 - **Per-agent attestation policy beyond `attestation_kinds_accepted`.** Per-method attestation requirements (capability attestation in [Identity service](#identity-service) §6) remain global. Per-agent rule overrides — "this specific agent's `wire_transfer` calls require measurement X" — wait for the global rule to settle before being layered on.
 - **Agent groups / hierarchies.** No nested ownership, no parent-child agents, no inheritance. Each agent is a flat record. If 50 agents share an envelope, register 50 records (the CLI's `--if-absent` makes this scriptable).
+
+---
+
+## Tenancy scope
+
+
+Cross-cutting clarification — applies to every module. Warden v1 ships a **single-tenant-per-deployment posture with a tenant-scoped trust root**. Operators should not conflate "the SVID carries a tenant segment" with "the system enforces tenant isolation end-to-end."
+
+### 1. What is tenant-scoped today
+
+- **Agent enrollment** (`warden-identity`). `POST /agents` validates the request body's `tenant` against the OIDC token's tenant claim and returns `403 tenant_mismatch` on mismatch ([Agent onboarding §8.3 per-tenant IdP](#agent-onboarding-wao)). Schema enforces `UNIQUE (tenant, agent_name)` including `Decommissioned` rows; reads filter `WHERE tenant=?`. Index `agents_by_tenant_state` exists.
+- **SVID URIs.** Every instance certificate carries `spiffe://<td>/tenant/<tid>/agent/<name>/instance/<uuid>` ([Identity service §3](#identity-service)). The tenant segment is signed into the cert by Vault Transit and is durable for the cert's lifetime — the SVID URI is the immutable artifact this whole section is shaped around.
+- **v3 lifecycle chain rows** (`warden-ledger`). Agent register / rotate / revoke / suspend / decommission events live in chain v3 with a `tenant` column; `read_lifecycle_for_agent` gates `WHERE tenant=? AND agent_id=?` (index `idx_entries_tenant_agent`). This is the one ledger surface that is tenant-isolated end-to-end.
+
+### 2. What carries `tenant` as a field but does not filter on it
+
+- **v1/v2 verdict rows** (`warden-ledger`). `entries.tenant` exists as a column on all rows but no read function references it. The `/audit/{agent_id}` JSON receipt, `/audit/paged`, the console's `/audit` page fan-out, `/audit/replay/corpus`, and the distinct-agents list are global across tenants.
+- **Self-Learn mining corpus** ([Console policy management](#console-policy-management)). `read_replay_corpus` has no tenant predicate; the miner sees every tenant's traffic in a shared pool.
+- **Policy Lab replay-batch.** Same SQL, same gap.
+
+### 3. What has no tenant axis at all
+
+- **Policy ruleset** (`warden-policy-engine`). The `policies` and `policy_versions` tables have no `tenant` column. One engine; one active ruleset; applied to every agent regardless of tenant claim. Activating, deactivating, or editing a policy is deployment-wide.
+- **HIL pending queue** (`warden-hil`). `pending_requests` has no `tenant` column; one global approval queue. A human approver cannot tell which tenant a pending belongs to except by inspecting the `agent_id` prefix convention.
+- **Brain `/inspect`** (`warden-brain`). Tenant is not in the request shape; classifiers, persona drift models, and indirect-injection detectors are identical for every caller.
+- **Console UI.** `WARDEN_CONSOLE_AGENTS_TENANT` is process-wide (default `acme`). No tenant switcher; every page reads the global state above.
+
+### 4. Why this shape
+
+The SVID is durable infrastructure. Once issued and signed by Vault Transit, the URI cannot be rewritten without re-issuance. Adding the `tenant/<tid>` segment at v1 costs near zero; adding it on day 200 means re-rolling every running agent and handling the gap period where some workloads carry tenant-aware URIs and some do not. The OIDC tenant gate at enrollment is a real security boundary today — it prevents tenant-A credentials from minting a tenant-B SVID at the trust root — even though downstream services do not filter on tenant. The work is therefore not nominal even before multi-tenant SaaS ships.
+
+Downstream tenant-scoping (v1/v2 verdict reads, policy ruleset, HIL queue, mining corpus, Brain context) is the year-2 multi-tenant workstream. The Agent Onboarding section already calls the broader piece out of scope ([§15 "Tenant lifecycle"](#agent-onboarding-wao)); this section is the stocktaking complement that an operator can read in one sitting.
+
+### 5. Implication for v1 deployments
+
+One Warden deployment serves one operational tenant. Cross-tenant federation happens at the SPIFFE bundle layer (`/.well-known/spiffe-bundle`, see [Identity service](#identity-service) "Cross-tenant federation"), not by sharing a console process between two tenant orgs. Operators who need data-plane isolation today should deploy two stacks — separate compose, separate ledger volume, separate identity CA — and federate via the bundle endpoint. Year-2 SaaS-style multi-tenant support, where one deployment serves N tenant orgs with isolated audit / policy / HIL state, is deferred.
+
+### 6. What this section is not
+
+- It does not commit to a roadmap date for closing the gaps in §2 / §3. Year-2 means "after v1 settles," not a quarter.
+- It does not propose API shapes for tenant-aware reads. When the year-2 workstream picks up, the migration design lands as a fresh section, not as edits here.
+- It is not authoritative for `warden-charts`. The Helm chart's multi-replica posture has separate caveats called out per-service in `values.yaml`; this section covers wire / data isolation only.
 
 ---
 
