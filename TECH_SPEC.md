@@ -1613,6 +1613,7 @@ POST   /policies/{name}/activate                  (Admin)
 POST   /policies/{name}/deactivate                (Admin)
 DELETE /policies/{name}                           soft delete (Admin)
 POST   /policies/{name}/rollback/{version}        (Admin)
+POST   /policies/evaluate-batch                   replay corpus (Admin) — Policy Lab
 ```
 
 All write requests carry a JSON body with `{reason: string, expected_current_version: int}` (create omits `expected_current_version`; rollback's body shape is `{reason}` only).
@@ -1665,6 +1666,115 @@ Each row carries `payload_sha256` over a canonical JSON object:
 Standard chain v3 fields (`actor_sub`, `actor_idp`, `seq`, `prev_hash`, `signature`, `key_id`) are populated as for any other chain v3 row. `actor_sub` and `actor_idp` come from the OIDC session of the operator who clicked Save. The `reason` field is non-optional; the API rejects `400 Bad Request` on empty or whitespace-only input.
 
 The ledger doesn't need a schema change. Chain v3's `HashableEntryV3` is event-kind-polymorphic via `payload_sha256` — adding `policy.*` event kinds is mechanical.
+
+### 7.5 Policy Lab (replay + diff)
+
+Operators authoring Rego today have no "what would this rule break?"
+surface — every edit is `Edit → Save → wait for incidents.` Policy
+Lab closes that loop by replaying a draft rule against (a) the last
+N days of real ledger traffic and (b) the chaos catalog corpus, then
+reporting the per-input verdict diff. Two new endpoints wire it up:
+
+**`GET /audit/replay/corpus` (ledger, internal mTLS router)**
+
+```
+GET /audit/replay/corpus?since=<rfc3339>&[until=<rfc3339>]
+                       &[agent_id=<id>]&[tool_type=<tt>]
+                       &limit=<n>                    // capped at 5000
+```
+
+Returns chain rows in the window whose stored `policy_decision`
+carries an `input_replay` block (i.e. rows emitted after Phase 6 by
+the policy-engine — pre-Phase-6 rows are skipped, not 500'd). Each
+row is reshaped into:
+
+```json
+{
+  "correlation_id": "abcd1234-…",
+  "captured_at": "2026-05-12T23:14:00Z",
+  "agent_id": "agent-bulk-7",
+  "method": "tools/call",
+  "input": { /* reconstructed PolicyInput, see below */ },
+  "historical_verdict": { "allow": false, "reasons": ["…"], "review_reasons": [] }
+}
+```
+
+The reconstructed `input` carries `tool_type`, `intent_score`,
+`agent_kind`, `arguments`, `attestation`, `agent_history.last_tool`
+from `policy_decision.input_replay`; `agent_id`, `method`,
+`correlation_id`, `agent_spiffe`, and `current_time` from the row
+itself. `current_time` is the row's `timestamp` (NOT now) so
+date/hour-sensitive rules replay against the original wall-clock.
+
+`policy_decision.input_replay` is additive: the existing console
+readers continue to read `policy_decision.allow / .reasons /
+.review_reasons` unchanged. The policy-engine's forensic emission
+populates the new block in `build_forensic_event`.
+
+Route is on the ledger's internal mTLS-gated router. The prod and
+dev Caddyfiles exclude `/audit/replay/*` from their public ledger
+proxies — operators reach it only via the console (over the mTLS
+listener with the console's SPIFFE id in the allowlist).
+
+**`POST /policies/evaluate-batch` (policy-engine)**
+
+```json
+{
+  "candidate_rego": "package warden.authz\n…",
+  "candidate_name": "deny_after_hours.rego",
+  "mode": "add" | "replace",
+  "replace_rule_name": "after_hours_rule",   // required when mode=replace
+  "inputs": [ /* PolicyInput */, … ]          // capped at 5000
+}
+```
+
+Response on 200:
+
+```json
+{
+  "active_compile_ok": true,
+  "candidate_compile_ok": true,
+  "results": [
+    {
+      "correlation_id": "…",
+      "before": { "allow": true,  "reasons": [], "review_reasons": [] },
+      "after":  { "allow": false, "reasons": ["…"], "review_reasons": [] },
+      "diff":   "allow_to_deny" | "allow_to_yellow" | "deny_to_allow"
+              | "yellow_to_allow" | "yellow_to_deny" | "deny_to_yellow"
+              | "unchanged"
+    }, …
+  ]
+}
+```
+
+`diff` is computed against the three-tier classification of each
+verdict:
+
+- **Allow**: `allow == true`.
+- **Yellow**: `allow == false && review_reasons` non-empty (proxy
+  forwards to HIL).
+- **Deny**: `allow == false && review_reasons` empty (hard reject).
+
+Compile errors return `400` with a structured body the SDK exposes
+via `warden_sdk::parse_batch_error`:
+
+```json
+{
+  "active_compile_ok": true,
+  "candidate_compile_ok": false,
+  "compile_error": {
+    "message": "compile candidate draft.rego: …",
+    "line": 7,
+    "column": 14
+  }
+}
+```
+
+Implementation: the handler reads the active policy set from
+SQLite, builds a "before" engine and a "candidate" engine
+in-memory, and runs each input through both. The live engine in
+AppState is never touched. `mode=replace` filters out the named
+rule before adding the candidate; `mode=add` only appends.
 
 ### 8. Authorization
 
