@@ -140,6 +140,29 @@ Issuer keys live in **Vault Transit** by default (Warden already runs Vault for 
 
 This is the highest-value bullet — non-repudiation is what unlocks the §15 "trust dividend" insurance story.
 
+```mermaid
+flowchart LR
+  Row[Ledger row N — id, timestamp, agent_id, agent_spiffe, method, intent_category, authorized, reasoning, policy_decision, signature, key_id, seq, prev_hash]
+  Hashable[Canonical JSON — hashable subset, dispatched by chain_version v1 or v2 or v3]
+  Hash[SHA-256]
+  Entry[entry_hash N]
+  Next[Row N+1 — prev_hash = entry_hash N]
+
+  Vault[(Vault transit — warden-identity ed25519)]
+  Sign[/sign — proxy calls after verdict resolves/]
+  Sig[signature + key_id stamped onto row]
+
+  Verify[GET /verify — walks the chain]
+  JWKS[/jwks.json — public verifier/]
+
+  Row --> Hashable --> Hash --> Entry --> Next
+  Row --> Sign --> Vault --> Sig --> Row
+  Verify --> Row
+  Verify --> JWKS
+```
+
+Per-row signature commits to `prev_hash`, so tampering with any earlier row breaks every later signature — two-layer integrity, see §5.2.
+
 #### 5.1 What gets signed
 
 After the security verdict resolves and `forward_upstream` runs (or is denied), the proxy calls `warden-identity` `/sign` with:
@@ -3192,6 +3215,34 @@ sourced from `current.load()`.
 ---
 
 ## Threat model
+
+The five system-wide threats Warden treats as in-scope, plus where
+each one's mitigation lives. STRIDE per-layer detail follows below.
+
+```mermaid
+flowchart LR
+  T1[T1 — Stolen client cert replayed from a different host]
+  T2[T2 — Agent A impersonates Agent B in an A-to-B call]
+  T3[T3 — Compromised supply chain — agent binary swapped post-deploy]
+  T4[T4 — Insider replays a ledger row claiming the agent did it]
+  T5[T5 — Human user repudiates an HIL approval — not me]
+
+  L1[Layer 1 — warden-proxy]
+  ID[warden-identity]
+  L3[Layer 3 — warden-policy-engine]
+  L4[Layer 4 — warden-ledger]
+
+  T1 -->|cert TTL up to 1h, attested issuance| L1
+  T1 -->|short-lived SVID minting| ID
+  T2 -->|audience-bound actor token check| L1
+  T2 -->|SVID-bound actor_token issuance| ID
+  T3 -->|attestation evidence on PolicyInput| L1
+  T3 -->|capability attestation gate for Yellow tier| ID
+  T4 -->|per-action ed25519 signature in row| ID
+  T4 -->|prev_hash chain — tampering breaks every later signature| L4
+  T5 -->|delegation grant — act.sub binds the human| ID
+  T5 -->|WebAuthn approver signature on HIL state-transition| L3
+```
 
 
 This document is the public threat model for Agent Warden. It is written

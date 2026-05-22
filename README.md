@@ -5,6 +5,13 @@ The control plane for the agentic enterprise: a zero-trust security, governance,
 > **Investment thesis (one sentence).**
 > Agent Warden is the mandatory brakes-and-steering for the multi-trillion-dollar AI engine — the system that lets enterprises run autonomous agents at full speed without betting the company on a probabilistic model.
 
+System-wide architecture diagrams — the C4 system context + container
+view, deployment topology, the demo-prefix end-to-end flow, and the
+full trust chain from CA root down to per-action ed25519 — live in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Two inline diagrams
+in the wire-contract spec (ledger chain anchoring + threat model T1-T5)
+live inside [`TECH_SPEC.md`](TECH_SPEC.md).
+
 ---
 
 ## Contents
