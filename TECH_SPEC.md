@@ -23,6 +23,39 @@ Consolidated technical record for Agent Warden. Each major section below was pre
 
 ---
 
+## §0. Module status by release
+
+One-glance reference for *what shipped when* and *which services
+each module landed on*. Each row mirrors a section below; the
+authoritative wire-contract detail still lives in those sections.
+**Status legend:** **shipped** = live in prod on the demo VPS today;
+**designed** = TECH_SPEC entry exists but no compose / chart shipment.
+
+| § | Module | Status | Landed | Services touched |
+|---|---|---|---|---|
+| 1 | [Identity service](#identity-service) | shipped | — | `warden-identity` (new, port 8086 / 8186), `warden-proxy`, `warden-policy-engine`, `warden-ledger`, `warden-hil` |
+| 2 | [Agent onboarding (WAO)](#agent-onboarding-wao) | shipped | chain v3 | `warden-identity`, `warden-ctl` (new binary `wardenctl`), `warden-console`, `warden-ledger`, `warden-e2e`, `warden-chaos-monkey` |
+| 3 | [Tenancy scope](#tenancy-scope) | described | — | (semantics, no new service) |
+| 4 | [Console config page](#console-config-page) | shipped | — | `warden-console`, `warden-sdk` (+3 public getters) |
+| 5 | [Operator authentication](#operator-authentication) | shipped | — | `warden-hil` (passkey + session), `warden-console` (auth-mode + viewer/approver gates) |
+| 6 | [Regulatory export](#regulatory-export) | shipped (slices 1+2+3) | — | `warden-ledger`, `warden-identity` (new `POST /sign/blob`), `warden-sdk`, `warden-ctl` |
+| 7 | [Demo experience](#demo-experience) | shipped | — | `warden-website`, `warden-demo-mint` (new), `warden-console`, `warden-proxy`, `warden-hil`, `warden-ledger`, `warden-chaos-catalog` (new), `warden-simulator` |
+| 8 | [Console policy management](#console-policy-management) | shipped | — | `warden-policy-engine` (SQLite store + write API), `warden-console`, `warden-sdk`, `warden-ledger` (consumes `policy.*` event kinds — chain v3 is event-kind-polymorphic, no schema bump) |
+| 9 | [Policy catalog](#policy-catalog) | shipped | — | `warden-policy-engine` (frontmatter + 4 endpoints), `warden-console` (`/policies/library`), `warden-sdk`, `warden-ctl` (`policy scaffold` + `policy library`) |
+| 10 | [Forensic-tier deep review](#forensic-tier-deep-review) | shipped 2026-05-13 | v0.6.0 | `warden-deep-review` (new repo), `warden-e2e`, `warden-charts` (chart 0.7.0 — eight-service stack, shipped 2026-05-14) |
+| 11 | [Internal service mTLS](#internal-service-mtls) | shipped (apps v0.8.3 → NATS v0.8.4 → six sessions through 2026-05-14) | v0.8.3, v0.8.4 | every backend (`warden-proxy`, `warden-brain`, `warden-policy-engine`, `warden-ledger`, `warden-hil`, `warden-identity`, `warden-console`, `warden-simulator`) — every internal application hop is now mTLS-gated; NATS transport pinned TLS+mTLS in v0.8.4 |
+| 12 | [Workload SVID refresh](#workload-svid-refresh) | designed (implementation v1.x+3) | — | `warden-identity` (issuer), every internal service (consumer) |
+| 13 | [Threat model](#threat-model) | reference | — | (STRIDE table, no new service) |
+| 14 | [Runbooks](#runbooks) | reference | — | (on-call procedures, no new service) |
+
+Versions in the **Landed** column reference `warden-specs/VERSION`
+(the demo-VPS deploy axis) or chain versions where the wire schema
+moved. Modules without a single landed version were rolled in over
+several patches and the per-section "Module status" line carries the
+detail.
+
+---
+
 ## Identity service
 
 
