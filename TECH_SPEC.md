@@ -1252,6 +1252,13 @@ The `/hil` queue is an operator workbench, not just a list. Shipped additive on 
 
 Hard approver-group routing and four-eyes (§8) remain deferred — these additions are queue ergonomics, not a change to *who* may decide.
 
+### 10. Incident timeline + saved audit views (operator UX)
+
+Read-only console surfaces; **no new ledger endpoint and no wire-contract change** — both source the existing audit-read API:
+
+- **Incident timeline** — `GET /timeline` (console, `require_viewer`). Fans out the ledger's full agent list (`list_agents`) over a `?window=1h|24h|7d` span and classifies each row into five aligned sparkline series — request volume, denies, yellow (review), policy changes (`event_kind` `policy.*`), and human approvals (`intent_category` `HIL`) — on one shared bucket axis so correlated spikes line up. A notable-events feed lists policy mutations, denials, and HIL decisions newest-first, each linking to the existing `/audit/correlation/{id}` drill. Roster is the full chain list (not the simulator-only roster the `/stats` pages use) so policy mutations, stamped under `agent_id = "warden-policy-engine"`, are included. Honors the `hide_sim` toggle.
+- **Saved audit views** — client-side only. The `/audit` page persists named filter sets to `localStorage` (`warden_audit_views`); a re-applied view is just a navigation to `/audit?<saved query>`. Progressive enhancement — the filter form works with JS disabled.
+
 ---
 
 ## Regulatory export
