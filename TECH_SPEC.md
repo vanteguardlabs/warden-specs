@@ -1241,6 +1241,17 @@ Triggers, not commitments — listed so a future contributor knows the hooks are
 - **Admin role + agent-registry UI in console** — first user who explicitly wants agent CRUD outside `wardenctl`. Until then, `wardenctl` + direct identity API are sufficient.
 - **Four-eyes / separation-of-duties** — first buyer demanding per-human approval limits or "two distinct approvers required." This also triggers an upgrade from self-link to a more rigorous identity unification scheme.
 
+### 9. Approval Center (operational)
+
+The `/hil` queue is an operator workbench, not just a list. Shipped additive on top of §1–§6 — **no `/decide` wire-contract change and no new `Status`**:
+
+- **Queue filter / search / sort** — `GET /hil?q=&risk_tier=&sort=`. `q` is a case-insensitive substring over agent_id / method / risk_summary; `risk_tier` ∈ {safe, risky, destructive, unscored} keys on the sandbox severity; `sort` ∈ {newest, oldest}. Filtering is in-process in the console (the live queue is small).
+- **Bulk approve / deny** — `POST /hil/bulk/{approve,deny}` (console; approver-gated, demo-session rejected). Loops `/decide` per id; per-row conflicts (already decided / TTL-swept) are skipped, and the response re-renders the filtered `#hil-list` fragment in one swap.
+- **SLA escalation** — HIL's TTL sweeper re-notifies approvers (a Slack / Teams escalation card) once a still-`Pending` row crosses `created_at + ttl_seconds × WARDEN_HIL_SLA_ESCALATE_FRACTION` (default 0.5; 0 disables), *before* the auto-deny. Idempotent: one nullable `escalated_at` column plus a conditional UPDATE fire the card exactly once. Emits a `warden.forensic` event with `kind = "escalated"` (the row stays `Pending`) and increments `warden_hil_escalations_total`.
+- **Approver analytics** — `GET /approvals/stats?window=1h|6h|24h|7d` (warden-hil, read-only, ungated like `/pending`; SPIFFE-gated in mTLS mode) computes decided totals, deny rate, median / p95 time-to-decide (human decisions only — `system:ttl-sweep` excluded), oldest-pending age, and a per-approver breakdown from the local `pending_requests` rows. Surfaced at `/hil/analytics` in the console.
+
+Hard approver-group routing and four-eyes (§8) remain deferred — these additions are queue ergonomics, not a change to *who* may decide.
+
 ---
 
 ## Regulatory export
