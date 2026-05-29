@@ -3345,15 +3345,19 @@ queryable `signal` column (vocabulary extended with `egress_violation`,
 `would_deny_egress`, `would_pend_egress`); the risk + entity types append
 to `reasoning` as `| egress: <detail>`. An inline-deny row reads
 `authorized: false` with `intent_category = "EgressBlocked"`. Rows join
-the originating request by `correlation_id`. In `WARDEN_MODE=observe` the
-layer classifies but never blocks or escalates — it records the
-`would_deny_egress` / `would_pend_egress` signal and forwards regardless.
+the originating request by `correlation_id`. Under
+`WARDEN_PROXY_EGRESS_MODE=observe` (or the proxy-wide `WARDEN_MODE=observe`)
+the layer classifies but never blocks or escalates — it records the
+`would_deny_egress` / `would_pend_egress` signal and forwards regardless,
+so egress can be soaked on live traffic while the request pipeline keeps
+enforcing.
 
 ### Configuration
 
 | Service | Var | Default |
 |---|---|---|
-| proxy | `WARDEN_PROXY_EGRESS_SCAN_TOOLS` (CSV of MCP methods) | `""` (off) |
+| proxy | `WARDEN_PROXY_EGRESS_SCAN_TOOLS` (CSV of tool names — MCP `params.name`, e.g. `read_file`; the JSON-RPC method also matches) | `""` (off) |
+| proxy | `WARDEN_PROXY_EGRESS_MODE` (`enforce`\|`observe`) | `enforce` |
 | proxy | `WARDEN_BRAIN_SCAN_URL` | `WARDEN_BRAIN_URL` with `/inspect`→`/scan-response` |
 | proxy | `WARDEN_PROXY_EGRESS_ENTROPY_THRESHOLD` | `6.5` |
 | proxy | `WARDEN_PROXY_EGRESS_SIZE_THRESHOLD_BYTES` | `65536` |
