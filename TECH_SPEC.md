@@ -3341,8 +3341,8 @@ model is configured by `detectors.scan_response` in
 The egress verdict rides the proxy's existing consolidated forensic row —
 **no new chain version, no new ledger columns**. The decision is the
 queryable `signal` column (vocabulary extended with `egress_violation`,
-`egress_review_denied`, `egress_review_approved`, `egress_suspicious`,
-`would_deny_egress`, `would_pend_egress`); the risk + entity types append
+`egress_review_denied`, `egress_review_approved`, `egress_review_unreachable`,
+`egress_suspicious`, `would_deny_egress`, `would_pend_egress`); the risk + entity types append
 to `reasoning` as `| egress: <detail>`. An inline-deny row reads
 `authorized: false` with `intent_category = "EgressBlocked"`. Rows join
 the originating request by `correlation_id`. Under
@@ -3361,7 +3361,7 @@ enforcing.
 | proxy | `WARDEN_BRAIN_SCAN_URL` | `WARDEN_BRAIN_URL` with `/inspect`→`/scan-response` |
 | proxy | `WARDEN_PROXY_EGRESS_ENTROPY_THRESHOLD` | `6.5` |
 | proxy | `WARDEN_PROXY_EGRESS_SIZE_THRESHOLD_BYTES` | `65536` |
-| proxy | `WARDEN_PROXY_MAX_RESPONSE_BYTES` | `10000000` |
+| proxy | `WARDEN_PROXY_EGRESS_MAX_RESPONSE_BYTES` | `10000000` |
 | proxy | `WARDEN_PROXY_EGRESS_DENY_CONFIDENCE` | `0.95` |
 | proxy | `WARDEN_PROXY_EGRESS_REVIEW_CONFIDENCE` | `0.5` |
 | brain | `detectors.scan_response` (YAML) | unset → `pii` provider |
