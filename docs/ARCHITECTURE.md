@@ -197,10 +197,10 @@ flowchart LR
   Internet --> Browser
   Internet --> Agent
 
-  Browser -->|warden.vanteguardlabs.com| HostCaddy
-  Browser -->|console-demo.vanteguardlabs.com| HostCaddy
-  Browser -->|warden-dev.vanteguardlabs.com — operator only| HostCaddy
-  Browser -->|console-dev.vanteguardlabs.com — operator only| HostCaddy
+  Browser -->|clavenar.com| HostCaddy
+  Browser -->|demo.clavenar.com| HostCaddy
+  Browser -->|console.clavenar.com — operator only| HostCaddy
+  Browser -->|console.clavenar.com — operator only| HostCaddy
   Agent -->|mTLS — 8443 or 19443| P_proxy
 
   HostCaddy -->|clavenar.…| P_website

@@ -1334,7 +1334,7 @@ cd repos/clavenar-lite && fly launch --image ghcr.io/clavenar/clavenar-lite:late
 **Verify.**
 
 ```bash
-open https://warden.vanteguardlabs.com/docs/
+open https://clavenar.com/docs/
 ```
 
 ---
@@ -1764,7 +1764,7 @@ CLAVENAR_DEEP_REVIEW_ALERT_WEBHOOK=http://localhost:9999/page ./run.sh
 curl http://localhost:8085/deep-review
 
 # Live demo VPS
-curl -sf https://console-demo.vanteguardlabs.com/deep-review | grep -o 'Deep review'
+curl -sf https://demo.clavenar.com/deep-review | grep -o 'Deep review'
 ```
 
 ---

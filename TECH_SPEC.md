@@ -1395,7 +1395,7 @@ Lives under a new top-level `regulatory` verb (own surface — distinct from `ag
 
 Companion to none of the existing sections in form. Where [Console config page](#console-config-page) is one read-only page and [Agent onboarding](#agent-onboarding-wao) is a multi-service initiative with a chain version bump, this section sits between: a public demo surface that spans the marketing site, a token-mint service, the existing operator console, and the backend stack, but introduces no new long-running storage and no chain version change.
 
-**Module status:** **shipped.** Extends `clavenar-website` (guided tour + `/#contact` CTA), introduces `clavenar-demo-mint` (small Rust HS256-issuing service behind Cloudflare Turnstile, not a CF Worker — the original CF-Worker plan was dropped for parity with the rest of the in-stack Rust services and to keep the mint event auditable through the same NATS plumbing every other component uses), `clavenar-console` (demo-session cookie + curated `/demo` scenarios + `/demo/fire/{scenario}` endpoint), `clavenar-proxy` (correlation-ID splicing for the `X-Clavenar-Demo-Prefix` header), `clavenar-hil` + `clavenar-ledger` (token-prefix-scoped read filters and HIL decide enforcement), `clavenar-chaos-catalog` (pure-data attack catalog consumed by both `clavenar-chaos-monkey` CLI and console `/demo/fire`), `clavenar-simulator` (`--hil-skip-agent-id-prefix demo-` so visitors aren't auto-approved out from under themselves). Hosted at `warden.vanteguardlabs.com` (marketing) + `console-demo.vanteguardlabs.com` (operator surface).
+**Module status:** **shipped.** Extends `clavenar-website` (guided tour + `/#contact` CTA), introduces `clavenar-demo-mint` (small Rust HS256-issuing service behind Cloudflare Turnstile, not a CF Worker — the original CF-Worker plan was dropped for parity with the rest of the in-stack Rust services and to keep the mint event auditable through the same NATS plumbing every other component uses), `clavenar-console` (demo-session cookie + curated `/demo` scenarios + `/demo/fire/{scenario}` endpoint), `clavenar-proxy` (correlation-ID splicing for the `X-Clavenar-Demo-Prefix` header), `clavenar-hil` + `clavenar-ledger` (token-prefix-scoped read filters and HIL decide enforcement), `clavenar-chaos-catalog` (pure-data attack catalog consumed by both `clavenar-chaos-monkey` CLI and console `/demo/fire`), `clavenar-simulator` (`--hil-skip-agent-id-prefix demo-` so visitors aren't auto-approved out from under themselves). Hosted at `clavenar.com` (marketing) + `demo.clavenar.com` (operator surface).
 
 Design decided by a `/grill-me` walkthrough. Thirteen architectural decisions resolved in sequence; four confirmations on operational tradeoffs. This section is the consolidated record + a snapshot of how the build ultimately landed (one substrate substitution: in-stack Rust mint instead of CF Worker).
 
@@ -1440,7 +1440,7 @@ The demo is *not* a sales-replacement and *not* a free trial. It's a self-serve 
 
 #### 3.1 Guided tour
 
-Three-scenario tour on `vanteguardlabs.com/demo`:
+Three-scenario tour on `clavenar.com/demo`:
 
 | Order | Scenario | Length (auto-play) | Layer focus |
 |---|---|---|---|
@@ -1456,7 +1456,7 @@ The tour is **fully client-side** (animations + pre-canned responses). No backen
 
 #### 3.2 Console handoff
 
-CTA at end of tour: visitor passes Cloudflare Turnstile on `warden.vanteguardlabs.com/#contact` → POSTs to `clavenar-demo-mint` at `console-demo.vanteguardlabs.com/mint` → mint issues a 30-min HS256 JWT carrying `sub`, `correlation_prefix` (8 hex chars, `demo-` prefix), and `agent_id` (`demo-<hex>-bot`) → 303-redirects to `console-demo.vanteguardlabs.com/#token=<jwt>`.
+CTA at end of tour: visitor passes Cloudflare Turnstile on `clavenar.com/#contact` → POSTs to `clavenar-demo-mint` at `demo.clavenar.com/mint` → mint issues a 30-min HS256 JWT carrying `sub`, `correlation_prefix` (8 hex chars, `demo-` prefix), and `agent_id` (`demo-<hex>-bot`) → 303-redirects to `demo.clavenar.com/#token=<jwt>`.
 
 Browser JS shim (`clavenar-console/templates/base.html`) reads the URL fragment, POSTs to `/api/demo-session/exchange` → console sets HttpOnly `Secure SameSite=Lax` cookie, redirects to the clean URL. Standard fragment-auth pattern; the token never appears in server logs. (The `SameSite=Lax` choice over the originally-planned `Strict` is the only deviation from the design — the Strict variant blocked the post-mint navigation cross-site bounce.)
 
@@ -1478,7 +1478,7 @@ HIL approve/deny works on the visitor's own pendings (per-prefix filter enforces
 ```
 Cloudflare (CDN + WAF + Turnstile JS)
     │
-    └──► warden.vanteguardlabs.com   — Hetzner VPS, single region, single compose stack
+    └──► clavenar.com   — Hetzner VPS, single region, single compose stack
             └── docker-compose --profile stack up -d
                 ├── nats, vault, bootstrap
                 ├── ledger, policy-engine, brain, hil, identity, proxy, console
@@ -1491,9 +1491,9 @@ Cloudflare (CDN + WAF + Turnstile JS)
 
 Subdomains served by Caddy on the same host:
 
-- `warden.vanteguardlabs.com` — marketing site (static).
-- `console-demo.vanteguardlabs.com` — operator surface (console + demo-mint behind same domain).
-- `console-dev.vanteguardlabs.com` — dev mirror (operator-only, `tls internal`).
+- `clavenar.com` — marketing site (static).
+- `demo.clavenar.com` — operator surface (console + demo-mint behind same domain).
+- `console.clavenar.com` — dev mirror (operator-only, `tls internal`).
 
 VPS firewall: Cloudflare IP ranges only on the public surfaces. The mint endpoint runs in-stack rather than at the CDN edge — chosen for consistency with the rest of the Rust stack, ability to emit ledger events from the mint event (the original CF-Worker plan couldn't write to NATS without a tunnel back through the VPS anyway), and simpler key rotation (one HS256 secret pinned in the compose YAML anchor `*demo-session-hs256` rather than split between Vault and Workers).
 
@@ -1510,13 +1510,13 @@ Mint shape:
 
 ```
 POST /mint
-  body: { "cf-turnstile-response": "..." } (form-encoded from the warden.vanteguardlabs.com/#contact form)
+  body: { "cf-turnstile-response": "..." } (form-encoded from the clavenar.com/#contact form)
   →
   1. siteverify Turnstile (reject on fail)
   2. correlation_prefix = "demo-" + 8 hex chars
   3. agent_id = "demo-" + 8 hex chars + "-bot"
   4. HS256 JWT { sub: <prefix>, prefix, agent_id, exp: now+30min }
-  5. 303 → `https://console-demo.vanteguardlabs.com/#token=<jwt>`
+  5. 303 → `https://demo.clavenar.com/#token=<jwt>`
 ```
 
 Every successful mint emits a `demo.session_minted` chain v1 forensic event to `clavenar.forensic` with `agent_id = "demo-mint"`, `correlation_id = <prefix>-mint`, and the pseudonymous `sub` carried in `signal`. The ledger appends the row alongside proxy/policy events so the audit chain has a record of when each demo session was created. `CLAVENAR_DEMO_MINT_NATS_URL` toggles it (unset → the mint still serves; the chain just doesn't get a session-creation row).
@@ -1547,7 +1547,7 @@ The `OR source = 'simulator'` is essential — it's how the visitor sees ambient
 #### 6.1 Hosting
 
 - **Single Hetzner VPS** runs the entire stack: marketing site, demo-mint, console, all backends. ~$20-30/mo.
-- **TLS**: Caddy with Let's Encrypt for `warden.vanteguardlabs.com` and `console-demo.vanteguardlabs.com`; `tls internal` for the operator-only `*-dev` mirrors.
+- **TLS**: Caddy with Let's Encrypt for `clavenar.com` and `demo.clavenar.com`; `tls internal` for the operator-only `*-dev` mirrors.
 - **Backups**: weekly snapshot of `ledger-data` volume to Cloudflare R2 (28-day lifecycle, ~$1/mo).
 
 #### 6.2 Failure mode
@@ -1578,7 +1578,7 @@ No status page (broadcasts outages to competitors / journalists; CISOs don't sub
 |---|---|---|
 | 1 | Tour animation (3 scenarios, auto-play + click-through) + polished marketing page + Plausible events wired | Visual story worked; copy landed; conversion measurable |
 | 2 | Receipts-page handoff (live chain rows fetched by sentinel correlation-id, `curl /verify` snippet) | Cryptographic-realness flex without backend complexity |
-| 3 | VPS + compose deployed at `console-demo.vanteguardlabs.com`; CF DNS + WAF in front | Real console URL works; ops baseline |
+| 3 | VPS + compose deployed at `demo.clavenar.com`; CF DNS + WAF in front | Real console URL works; ops baseline |
 | 4 | `clavenar-demo-mint` (in-stack Rust + Turnstile) + console demo-session cookie + HIL approve-prefix enforcement | Per-session isolation; defense-in-depth. *Deviation: in-stack Rust mint replaced the originally-planned CF Worker.* |
 | 5 | Ledger filter enforcement; `clavenar-chaos-catalog` library; `/demo/fire` curated attack menu | Full kick-the-tires console |
 | 6 | Simulator `--hil-skip-agent-id-prefix demo-`; UptimeRobot; weekly R2 backups; weekly demo-reset systemd timer | Production-grade ops |
@@ -1601,7 +1601,7 @@ Watch-out that held: **never deploy the console with auth disabled on a non-loop
 - ~~Animation copy and narrative beats per scenario~~ — finalized in the clavenar-website tour.
 - ~~Token-expiry-mid-session UX~~ — 401 surfaces as a banner; visitor returns to `clavenar.…/#contact` for a fresh token.
 - ~~CSS / brand polish on the demo console vs. operator console default~~ — single console build serves both; demo-session cookie is the only state difference.
-- ~~Domain choice~~ — resolved 2026-05-08: `warden.vanteguardlabs.com` + `console-demo.vanteguardlabs.com` (operator surface, also serves the mint endpoint at `/mint`).
+- ~~Domain choice~~ — resolved 2026-05-08: `clavenar.com` + `demo.clavenar.com` (operator surface, also serves the mint endpoint at `/mint`).
 - ~~Where the `clavenar-chaos-catalog` crate lives~~ — new sibling repo; consumed as a path-dep by `clavenar-chaos-monkey` CLI and `clavenar-console` `/demo/fire`.
 
 Still open after ship:
@@ -3848,7 +3848,7 @@ threats are real but addressed elsewhere or deferred deliberately.
 - **Multi-tenant isolation in the console.** Today the console is
   single-tenant per deployment. Multi-tenant SaaS is a year-2
   product question.
-- **Client-side typosquatting against `vanteguardlabs.com`.** Domain
+- **Client-side typosquatting against `clavenar.com`.** Domain
   hygiene, not a Clavenar control.
 - **DoS that requires resource limits the deployment guide already
   documents.** Operator's deployment configuration responsibility.
