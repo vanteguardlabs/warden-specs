@@ -429,6 +429,10 @@ curl http://localhost:8086/jwks.json | jq      # public verification material
 
 Then export the chain and verify a row's signature with `openssl` + `sha256sum` per the bundle's `README.txt` recipe (§7).
 
+**Blocked actions sign too.** The proxy signs the deny path (violation / review-denied) fail-soft, so a blocked attack lands as a chain-v2 row with the same `signature + key_id` anchor an approval gets — a denied wire transfer is as non-repudiable as an approved one.
+
+**Tamper-Evident Attack Receipt (in-browser verifier).** `clavenar-console` serves `/receipt`, where a visitor verifies a signed row entirely in their own browser: it recomputes each `entry_hash` with WebCrypto and checks the ed25519 signature against a same-origin `/jwks.json` passthrough — no Clavenar code installed. Because the signature is *inside* the v2 hashable form, forging one byte (a "Tamper test" button flips `denied → authorized`) shatters both the hash and the signature at once, while the server's global `/verify` still validates — proving the visitor's edit is the forgery, not the record. Canonical-form drift between the Rust ledger and the JS verifier is guarded by paired golden-vector tests (`clavenar-ledger` `receipt_canonical_golden_vectors` ↔ `clavenar-console` `receipt_canonical.test.mjs`).
+
 ### 3.4 Detached blob signing (`POST /sign/blob`)
 
 **Concept.** Sibling to `/sign`, used by `clavenar-ledger` for regulatory-export manifests. Signs a digest (not a structured payload), audience-tagged so a sig minted for one auditor can't be repurposed.

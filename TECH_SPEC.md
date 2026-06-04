@@ -71,7 +71,7 @@ The spec promises three capabilities. Restated as testable claims:
 | Spec bullet | Operational claim |
 |---|---|
 | OIDC / SPIFFE federation | Every agent has a verifiable workload identity bound to a human/team/tenant principal. Agent-to-agent calls require a Clavenar-mediated handshake, not just transport mTLS. |
-| Digital signatures for actions | Every Authorized or HIL-Approved tool call produces a Clavenar-issued, ledger-anchored signature over `(agent_id, correlation_id, method, request_payload, verdict, prev_hash)`. The signature is the legal proof. |
+| Digital signatures for actions | Every resolved tool call — Authorized, HIL-Approved, or blocked (denied / violation) — produces a Clavenar-issued, ledger-anchored signature over `(agent_id, correlation_id, method, request_payload, verdict, prev_hash)`. The signature is the legal proof; a blocked attack is as non-repudiable as an approval. |
 | Capability attestation | Sensitive tools (Yellow tier and a configurable allowlist) require fresh evidence the agent's runtime is unmodified — TPM/SGX quote, or remote-attestation token from a managed runtime. |
 
 Identity, in Clavenar's threat model, is **necessary but insufficient** (§13.1). WI's job is not to replace Brain/Policy/HIL — it is to make the `agent_id` field they all key off of cryptographically meaningful end-to-end.
@@ -292,7 +292,7 @@ Console (`clavenar-console`) needs a "Delegation: alice@acme via support-bot-3" 
 
 | Failure | Behaviour | Reasoning |
 |---|---|---|
-| `clavenar-identity` unreachable on `/sign` | Proxy fails *closed* on Yellow-tier and any tool with `attestation_required`; fails *open* (no signature, ledger v1 row) on Authorized non-attested calls, with a `signing_unavailable` signal in Brain's signal aggregator | Don't take the whole stack down because a non-critical service blips; do refuse to sign forged-checks-from-the-future |
+| `clavenar-identity` unreachable on `/sign` | Proxy fails *closed* on Yellow-tier and any tool with `attestation_required`; fails *open* (no signature, ledger v1 row) on Authorized non-attested calls, with a `signing_unavailable` signal in Brain's signal aggregator. Blocked verdicts (denied / violation) sign *fail-soft* — the request is already blocked, so a `/sign` outage only downgrades the receipt to v1, never changes the deny outcome | Don't take the whole stack down because a non-critical service blips; do refuse to sign forged-checks-from-the-future; a denial has no audit gap to fail-closed on |
 | Attestation expired mid-burst | Proxy returns 401 with `attestation_stale`; agent re-attests | Same model as expired SVID |
 | Vault Transit unavailable | Identity service degrades to `signing_unavailable` (above) | Single failure domain — Vault is already a hard dep |
 | Federation bundle stale (cross-tenant) | Reject A2A; allow same-tenant | Matches the §13.1 "identity is necessary but insufficient" framing — better to fail safe |
