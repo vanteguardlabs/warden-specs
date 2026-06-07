@@ -1340,7 +1340,7 @@ clavenar-lite graduate verify --report report.json         # offline; OK on a cl
 
 **Concept.** The typed Rust client. Two artifacts share one source of truth: `clavenar-console` consumes it, `clavenarctl` consumes it, external integrators consume it. SDK is the contract.
 
-**Implementation.** `repos/clavenar-sdk/`. Clients: `LedgerClient`, `HilClient`, `SimClient`, `AgentsClient`, `PoliciesClient`. Each exposes `base_url() -> &Url` for the `/config` page redaction-safe readout. `AgentsClient::bearer_fingerprint() -> Option<String>` returns sha256[..8] hex of the configured token (never the raw token). `LedgerClient::list_agents()` powers the audit page's default fan-out (§4.1). `PoliciesClient` is `Clone`-able and exposes the full Viewer/Admin surface described in §1.9; conflict responses parse via `PoliciesClient::parse_conflict()` so callers can surface the new metadata to operators.
+**Implementation.** `repos/clavenar-rust-sdk/`. Clients: `LedgerClient`, `HilClient`, `SimClient`, `AgentsClient`, `PoliciesClient`. Each exposes `base_url() -> &Url` for the `/config` page redaction-safe readout. `AgentsClient::bearer_fingerprint() -> Option<String>` returns sha256[..8] hex of the configured token (never the raw token). `LedgerClient::list_agents()` powers the audit page's default fan-out (§4.1). `PoliciesClient` is `Clone`-able and exposes the full Viewer/Admin surface described in §1.9; conflict responses parse via `PoliciesClient::parse_conflict()` so callers can surface the new metadata to operators.
 
 **Verify.** Cargo dep:
 
@@ -1362,16 +1362,16 @@ cargo run -p clavenar-sandbox-cli -- --method tools/call --params '{"name":"shel
 # Output: classification=Delete, severity=high, summary="rm -rf /etc/..."
 ```
 
-### 10.5 TypeScript SDK (`clavenar-ai-sdk`)
+### 10.5 TypeScript SDK (`@clavenar/agent-sdk`)
 
 **Concept.** Wrap-the-client adapter for `@anthropic-ai/sdk` and `openai` so dropping clavenar into a Node agent is a two-line change. Streaming + parallel `tool_use` + retries with jittered exponential backoff + observe-mode safety (clavenar being down can't break the agent — observe falls through to allow + logs). `onPolicyError` callback hooks let the app distinguish "clavenar was unreachable" from "clavenar actively denied" without re-implementing the verdict shape.
 
-**Implementation.** `repos/clavenar-ai-sdk/` — TypeScript, published as `clavenar-ai-sdk` on npm. `clavenarWrap(client, opts)` returns a wrapped client; the wrapper intercepts `messages.create` (Anthropic) and `chat.completions.create` (OpenAI), inspects each `tool_use` block via clavenar, and either allows / denies / parks. `ClavenarDenied`, `ClavenarPending`, `ClavenarTransportError` exception classes mirror the wire verdicts. `bearer-token` auth at the `clavenar-lite` ingress (mTLS still available for the full stack). Tests: TypeScript strict mode + tsc clean.
+**Implementation.** `repos/clavenar-typescript-sdk/` — TypeScript, published as `@clavenar/agent-sdk` on npm. `clavenarWrap(client, opts)` returns a wrapped client; the wrapper intercepts `messages.create` (Anthropic) and `chat.completions.create` (OpenAI), inspects each `tool_use` block via clavenar, and either allows / denies / parks. `ClavenarDenied`, `ClavenarPending`, `ClavenarTransportError` exception classes mirror the wire verdicts. `bearer-token` auth at the `clavenar-lite` ingress (mTLS still available for the full stack). Tests: TypeScript strict mode + tsc clean.
 
 **Verify.**
 
 ```bash
-cd repos/clavenar-ai-sdk && npm test
+cd repos/clavenar-typescript-sdk && npm test
 ```
 
 ### 10.6 Python SDK (`clavenar-ai`)
@@ -1392,7 +1392,7 @@ cd repos/clavenar-ai-py && pip install -e . && pytest
 
 **Implementation.** Spread across both SDK repos:
 
-- `clavenar-ai-sdk/examples/` — `native-anthropic/`, `native-openai/`, `vercel-ai/`, `mastra/`, `langchain-js/`, `openai-realtime/`, `anthropic-computer-use/`. Realtime ships `inspectRealtimeFunctionCall` / `isRealtimeFunctionCallDone` / `normalizeRealtimeFunctionCall` helpers for the WS pump pattern; Computer Use tool_use blocks already flow through `clavenarWrap` unchanged, so its recipe is wiring + a starter Rego snippet.
+- `clavenar-typescript-sdk/examples/` — `native-anthropic/`, `native-openai/`, `vercel-ai/`, `mastra/`, `langchain-js/`, `openai-realtime/`, `anthropic-computer-use/`. Realtime ships `inspectRealtimeFunctionCall` / `isRealtimeFunctionCallDone` / `normalizeRealtimeFunctionCall` helpers for the WS pump pattern; Computer Use tool_use blocks already flow through `clavenarWrap` unchanged, so its recipe is wiring + a starter Rego snippet.
 - `clavenar-ai-py/examples/` — `langchain_recipe.py`, `llamaindex_recipe.py`, `computer_use_recipe.py`, `openai_realtime_recipe.py`. Python helpers under `clavenar_ai.realtime`. Uses the canonical `inspect_tool_use(NormalizedToolCall, opts)` signature end-to-end including the `ClavenarPending.resolve()` raise-on-deny contract.
 
 All recipes pass their respective type checkers (TS strict mode, mypy strict). 98 + 61 tests respectively across the two SDKs.
@@ -1400,7 +1400,7 @@ All recipes pass their respective type checkers (TS strict mode, mypy strict). 9
 **Verify.**
 
 ```bash
-cd repos/clavenar-ai-sdk/examples/native-anthropic && npm install && npm start
+cd repos/clavenar-typescript-sdk/examples/native-anthropic && npm install && npm start
 cd repos/clavenar-ai-py/examples && python langchain_recipe.py
 ```
 
