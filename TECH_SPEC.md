@@ -1755,6 +1755,7 @@ CREATE TABLE policies (
   name TEXT PRIMARY KEY,
   content_type TEXT NOT NULL CHECK (content_type IN ('rego','json')),
   active INTEGER NOT NULL,                   -- 0 / 1
+  protected INTEGER NOT NULL DEFAULT 0,      -- 1 = baseline floor, never deactivatable/deletable
   current_version INTEGER NOT NULL,
   deleted_at TIMESTAMP NULL,                 -- soft delete tombstone
   created_at TIMESTAMP NOT NULL,
@@ -1798,18 +1799,21 @@ GET    /policies/{name}/diff?from=N&to=M          unified diff (Viewer)
 
 POST   /policies                                  create (Admin)
 PUT    /policies/{name}                           update (Admin)
-POST   /policies/{name}/activate                  (Admin)
-POST   /policies/{name}/deactivate                (Admin)
+POST   /policies/{name}/activate                  install one policy (Admin)
+POST   /policies/{name}/deactivate                uninstall one policy (Admin)
 DELETE /policies/{name}                           soft delete (Admin)
 POST   /policies/{name}/rollback/{version}        (Admin)
 POST   /policies/evaluate-batch                   replay corpus (Admin) — Policy Lab
+
+POST   /policies/categories/{domain}/activate     install whole category (Admin)
+POST   /policies/categories/{domain}/deactivate   uninstall whole category (Admin)
 ```
 
-All write requests carry a JSON body with `{reason: string, expected_current_version: int}` (create omits `expected_current_version`; rollback's body shape is `{reason}` only).
+All single-policy write requests carry a JSON body with `{reason: string, expected_current_version: int}` (create omits `expected_current_version`; rollback's body shape is `{reason}` only). The two **category** endpoints carry `{reason, actor_sub, actor_idp}` (no `expected_current_version` — a category sweep can't pin a per-row concurrency token; the lower-stakes "did someone race me" posture matches rollback) and return `{changed, skipped, results:[…]}` where `results` is the per-policy `MutationResponse` for each row that actually flipped. The whole category flips in **one** SQLite transaction and **one** engine rebuild; a row already in the target state is counted in `skipped`, not an error (idempotent). `{domain}` is matched against the `domain` frontmatter column over non-deleted rows. `protected` rows (the baseline floor — see §10) are **never** flipped by a category deactivate: they are silently skipped, so "uninstall the `cross-cutting` category" can't disable `governance.rego` and brick the engine.
 
 Failure modes:
-- `400 Bad Request` — regorus compile error (rego) or JSON Schema validation error (json). Body carries the parser error verbatim.
-- `409 Conflict` — `expected_current_version` doesn't match `policies.current_version`. Response body includes the new current version's metadata so the UI can prompt "policy was changed since you opened the editor; reload?".
+- `400 Bad Request` — regorus compile error (rego) or JSON Schema validation error (json), or a category deactivate that would leave zero active rego policies. Body carries the parser error verbatim.
+- `409 Conflict` — `expected_current_version` doesn't match `policies.current_version` on a single-policy write; or an attempt to deactivate / delete a `protected` floor policy. Response body includes the new current version's metadata so the UI can prompt "policy was changed since you opened the editor; reload?".
 - `403 Forbidden` — caller lacks `Admin` role.
 - `503 Service Unavailable` — outbox or NATS unreachable past retry budget; the SQLite + engine state is consistent, but the chain row hasn't landed yet. (Not surfaced in v1's happy path; documented for completeness.)
 
@@ -2156,7 +2160,20 @@ URL paths:
 
 On boot, after loading the persisted policy set from SQLite, `clavenar-policy-engine` attempts the engine build *before* binding the HTTP port. If the build fails (regorus version bump rendered an old policy uncompilable, or someone hand-edited SQLite into invalidity), the process exits non-zero with the regorus error. No fallback to the bundled `policies/*.rego` files. No fallback to no-policies. Loud failure is correct: silent fallback would mask the divergence.
 
-**Initial seed.** First boot with an empty `policies` table: ingest the on-disk `policies/*.rego` and `policies/*.json` files as version 1 of each, with `active=true`, `actor_sub="system"`, `actor_idp="bootstrap"`, `reason="initial seed from disk"`. Subsequent boots are no-ops (table non-empty). This is how today's deployments migrate without a separate seeding step.
+**Initial seed.** First boot with an empty `policies` table: ingest the on-disk policy files as version 1 of each, with `actor_sub="system"`, `actor_idp="bootstrap"`, `reason="initial seed from disk"`. Subsequent boots are no-ops (table non-empty). This is how today's deployments migrate without a separate seeding step.
+
+The seed splits into two tiers:
+
+- **Floor** — the files directly under `policies/` (`governance.rego`, `attestation.rego`, and the `.json` data documents the floor rules read). Always seeded `active=1` **and** `protected=1`. The floor is structurally undisableable: the single deactivate / delete paths and the category-deactivate sweep all refuse / skip `protected` rows. This is load-bearing — `governance.rego` is the only definition of `data.clavenar.authz.allow`, so disabling it would make every `/evaluate` total-deny (undefined `allow`) or, if it were the last rego, fail the boot-time engine build outright.
+- **Domain-pack templates** — the recursive `policies/templates/<domain>/**` library, seeded only when `CLAVENAR_POLICY_SEED_TEMPLATES=true`, with `protected=0`. Their seed-time `active` flag is governed by `CLAVENAR_POLICY_SEED_TEMPLATE_STATE` (`active`, the default for back-compat | `inactive`). This is the per-surface "installable on demand" knob: the demo surface (prod stack) seeds templates `active` so visitors see the full domain coverage live; the operator dev console seeds them `inactive` so an operator installs what they need on `/policies` (per-policy or per-category).
+
+`protected` is added by an additive `ALTER TABLE policies ADD COLUMN protected INTEGER NOT NULL DEFAULT 0`, `has_column`-guarded like the §4 metadata columns. Because the column defaults to 0, a pre-existing DB would not mark its floor protected on upgrade; so every boot also runs a `reconcile_protected_from_dir` pass that sets `protected=1` for exactly the policy names present as **non-recursive** entries of `policies/` (the floor) and `0` otherwise. Disk is the source of truth for the floor set, so this self-heals both upgraded DBs and any drift.
+
+Because the policy DB is ephemeral in the demo/dev compose stacks (no named volume — the default `policies.db` lives on the container layer), a rebuild-and-recreate deploy re-runs the first-boot seed, so `CLAVENAR_POLICY_SEED_TEMPLATE_STATE` takes effect on the next deploy with no manual reset.
+
+### 10.1 Demo read-only
+
+The demo surface shares **one** global policy DB across all concurrent visitors — policy state is not demo-prefix-isolated the way ledger / HIL reads are, and the weekly demo reset does not restore it. So on the demo surface every `/policies` **mutation** (create, update, activate, deactivate, delete, rollback, category activate/deactivate, template install) is refused for demo-session callers (the console gates them with `forbid_demo_session`, mirroring `/sim`). Demo visitors browse the catalog with everything pre-installed; the install/uninstall affordances are operator-only.
 
 ### 11. Out of scope for v1
 
@@ -2231,7 +2248,7 @@ The catalog is *not* a new policy-authoring product. Operators still edit Rego f
 **Explicitly out of scope (v1 non-goals):**
 
 - Auto-Lab on detail-page load. The endpoint is wired and the button is template-ready, but the page currently requires an explicit operator click — auto-replay against the catalog on every detail-page render would be noise on the engine. Operator-triggered preview only.
-- "Install all in domain X" bulk action. The filter URL is already a complete spec of the templates the operator wants, so a bulk-install endpoint would be ~10 lines; deferred to a follow-up once operators report wanting it.
+- ~~"Install all in domain X" bulk action.~~ **Shipped.** `POST /policies/categories/{domain}/{activate,deactivate}` (see [Console policy management §5](#console-policy-management)) flips a whole category in one transaction + one engine rebuild; the `/policies` index renders per-category Install-all / Uninstall-all buttons.
 - Editing a template in-place via the console. Templates are filesystem source-of-truth; the active-policy edit flow on `/policies/<name>/edit` remains the only console editor. Library is read-only.
 - Community / third-party template marketplace. Versioning, signing, trust-on-first-use, distribution — all of that lives behind a separate plan once the curated catalog stabilises at 100-200 entries.
 - Archetype / DSL layer over Rego. At 576 templates the file-per-policy model still scales (sub-bucketed under `policies/templates/<domain>/`); if the catalog grows past ~1000 a parametric layer becomes interesting. Follow-up: parametric / TOML-driven authoring is the natural next step at the next round of growth.
