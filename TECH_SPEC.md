@@ -21,6 +21,7 @@ Consolidated technical record for Clavenar. Each major section below was previou
 - [Internal service mTLS](#internal-service-mtls) — agreed substrate for proxy↔backend hops (shipped v0.8.3 — application hops; v0.8.4 — NATS transport)
 - [Workload SVID refresh](#workload-svid-refresh) — short-lived per-service SVIDs minted on top of the bootstrap cert (designed; implementation v1.x+3)
 - [Agent-facing error envelope](#agent-facing-error-envelope) — the shared JSON 403/429/503 body the data plane returns to callers
+- [Kill-chain breaker](#kill-chain-breaker) — cross-replica multi-step attack detection over a shared NATS-KV behavioral-history bucket
 - [Threat model](#threat-model) — STRIDE-organized, layer-by-layer
 - [Runbooks](#runbooks) — operational; maintained privately
 
@@ -49,6 +50,7 @@ authoritative wire-contract detail still lives in those sections.
 | 9a | [Policy exchange](#policy-exchange) | shipped | v1.5.0 | `clavenar-sdk` (pack manifest + `PackSigner`), `clavenar-chaos-catalog` (`policy_input` corpus), `clavenar-ctl` (`policy exchange {sign,install}`); reuses `/sign/blob` + `evaluate-batch` |
 | 10 | [Forensic-tier deep review](#forensic-tier-deep-review) | shipped 2026-05-13 | v0.6.0 | `clavenar-deep-review` (new repo), `clavenar-e2e`, `clavenar-charts` (chart 0.7.0 — eight-service stack, shipped 2026-05-14) |
 | 11 | [Internal service mTLS](#internal-service-mtls) | shipped (apps v0.8.3 → NATS v0.8.4 → six sessions through 2026-05-14) | v0.8.3, v0.8.4 | every backend (`clavenar-proxy`, `clavenar-brain`, `clavenar-policy-engine`, `clavenar-ledger`, `clavenar-hil`, `clavenar-identity`, `clavenar-console`, `clavenar-simulator`) — every internal application hop is now mTLS-gated; NATS transport pinned TLS+mTLS in v0.8.4 |
+| 11a | [Kill-chain breaker](#kill-chain-breaker) | shipped | v1.6.0 | `clavenar-proxy` (NATS-KV shared history store), `clavenar-policy-engine` (`recent_sequence` + governance.rego rule), `clavenar-e2e` (JetStream + `run-killchain.sh`) |
 | 12 | [Workload SVID refresh](#workload-svid-refresh) | designed (implementation v1.x+3) | — | `clavenar-identity` (issuer), every internal service (consumer) |
 | 13 | [Threat model](#threat-model) | reference | — | (STRIDE table, no new service) |
 | 14 | [Runbooks](#runbooks) | reference | — | (on-call procedures; maintained in clavenar-internal-specs) |
@@ -1728,7 +1730,7 @@ The console UI is *not* a rule editor for non-engineers — it's still a rego te
 - Rule-level toggles inside a file (would require either rego AST rewriting or per-rule feature flags; defer until file-level granularity proves insufficient).
 - Splitting `governance.rego` into per-axis files (`governance_denylist.rego`, `governance_velocity.rego`, …); a separate refactor with its own rollback story.
 - Two-person approval (4-eyes) for deactivation/delete of "critical" policies; the v1 defense is `Admin` role + chain audit + required reason.
-- Multi-replica `clavenar-policy-engine` consistency (NATS-KV invalidation à la velocity tracker); v1 ships single-replica.
+- Multi-replica `clavenar-policy-engine` *rule-set* consistency (compiled-Rego NATS-KV invalidation à la velocity tracker); still single-replica. Note: the proxy's *behavioral-history* KV substrate now ships (see [Kill-chain breaker](#kill-chain-breaker)) — that's per-agent request sequence, a different kind of state than the compiled rule set, so this rule-set item stays deferred.
 - Codemirror / Monaco editor; v1 uses plain `<textarea>` and leans on regorus error messages for syntax feedback.
 - Golden-test corpus gate on save; the chaos-monkey suite is *almost* this corpus today, but promoting it into a pre-save hook is its own project.
 - Git-backed policy storage (PR-review workflow); a different product than the console-CRUD shape we're building.
@@ -3527,6 +3529,80 @@ rate limits, 503 for HIL/identity unavailable, 400 for malformed). The
 body shape is additive: consumers that only read the status code or the
 correlation header are unaffected, and SDKs that predate the envelope
 fall back to treating the raw body as opaque text.
+
+---
+
+## Kill-chain breaker
+
+Break **multi-step attacks that span proxy replicas** — read a secret on
+replica A, exfiltrate via an external tool on replica B — by sharing each
+agent's recent authorized-tool sequence across the fleet over a NATS
+JetStream **KV** bucket, so the chain is reconstructed even though no
+single replica saw the whole thing.
+
+**Module status:** **shipped (v1.6.0).** Lives in `clavenar-proxy` (the
+shared history store), `clavenar-policy-engine` (the `recent_sequence`
+wire field + the Rego rule). No new chain version; the deny rides the
+existing forensic `policy_decision`/`reasoning` columns. Off by default —
+flip `CLAVENAR_PROXY_HISTORY_BACKEND=nats-kv` (needs JetStream).
+
+### 1. Shared behavioral history
+
+The proxy's `HistoryStore` trait gains a `NatsKvHistoryStore` backend
+(alongside the in-process default), cloning the velocity tracker's CAS-KV
+pattern: bucket `clavenar_history`, one key per agent, value a JSON
+[`AgentHistory`] carrying `last_tool` plus a bounded `recent_sequence` of
+`{ tool, method, ts_ms, replica }` events. The store stamps `ts_ms` + its
+own `replica` id at record time and truncates to 16 events. A record only
+happens **after** the upstream 2xx (same as the legacy `last_tool`), so a
+denied step never enters the sequence — the chain is built from
+*successful authorized* actions.
+
+Selector env (mirrors `pick_velocity_tracker`): `CLAVENAR_PROXY_HISTORY_BACKEND`
+(`inprocess` default | `nats-kv`), `CLAVENAR_PROXY_HISTORY_BUCKET`
+(default `clavenar_history`), `CLAVENAR_PROXY_HISTORY_WINDOW_SECS`
+(default 300; KV key TTL is `2×`). `nats-kv` requested but bucket-open
+fails → fall back to in-process + warn, never refuse boot.
+
+### 2. Detection in Rego, not Brain
+
+The proxy already passes `agent_history` inside the `PolicyInput` it POSTs
+to `/evaluate`, so adding `recent_sequence` to the policy-engine's
+`AgentHistory` (with `#[serde(default)]`) flows the sequence to Rego with
+no evaluate-path change — the whole `PolicyInput` *is* the Rego input.
+Detection lives in `governance.rego` as a `deny` rule (default hard-deny —
+it's a *breaker*; switch to `review` to route to HIL): if the current
+`tool_type` is in `external_egress_tools` and any `recent_sequence` event
+whose `tool` is in `sensitive_read_tools` happened within
+`kill_chain_window_ms`, deny with a `kill chain — …` reason. The window
+check uses the proxy-stamped `current_time` (not `time.now_ns()`) for
+determinism, comparing in milliseconds to stay inside numeric precision.
+Both tool-class sets are inline rego — the tuning knob.
+
+This is **add-only** w.r.t. safety: an empty/absent `recent_sequence`
+(older proxy, first request, or a NATS blip) simply never fires the rule,
+so the breaker can only *add* denies on top of the single-replica floor,
+never remove one.
+
+### 3. Consistency & failure posture
+
+Per-agent local mutex + JetStream KV CAS append (same shape as the
+velocity tracker) lets concurrent replicas grow one agent's sequence
+without clobbering. History enrichment is **fail-open**: a get error
+returns an empty history (never a fabricated chain), and a record error
+(post-authorization) only weakens *future* detection — it never blocks
+the current verdict. A NATS outage therefore degrades to single-replica
+behaviour, never a fleet-wide deny storm.
+
+### 4. Demo
+
+`clavenar-e2e/dev/run-killchain.sh` arms `nats-kv` history, drives a
+sensitive-read then an external-egress as one agent through the live
+stack, asserts the egress is denied with the kill-chain reason, and dumps
+`nats kv get clavenar_history <agent>` to show the recorded sequence — the
+value any replica reads. (A true 2-replica run needs a load balancer in
+front of the fixed host port; the KV value is the cross-replica substrate
+regardless.)
 
 ---
 

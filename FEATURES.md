@@ -322,6 +322,21 @@ clavenarctl policy exchange install ./acme-pack \
 #   …signature OK; backtest N attacks, 0 regressions; installed money_moves
 ```
 
+### 1.16 Fleet-wide kill-chain breaker
+
+**Concept.** A multi-step attack — read a secret, then exfiltrate it — often splits across requests and, in a horizontally-scaled fleet, across proxy replicas. Per-agent state that lives only in one replica's memory can't see the whole chain. The kill-chain breaker shares each agent's recent authorized-tool sequence across the fleet over a NATS JetStream KV bucket, so the policy engine reconstructs the chain and denies the exfil step even when no single replica saw both halves.
+
+**Implementation.** The proxy's `HistoryStore` gains a `NatsKvHistoryStore` (`clavenar-proxy/src/history.rs`) alongside the in-process default, cloning the velocity tracker's CAS-KV pattern: bucket `clavenar_history`, one key per agent, value a JSON `AgentHistory { last_tool, recent_sequence: [{tool, method, ts_ms, replica}] }` bounded to 16 events. The store stamps `ts_ms` + its `replica` id at record time; records happen only after the upstream 2xx (denied steps never enter the sequence). `boot::pick_history_store` selects the backend from `CLAVENAR_PROXY_HISTORY_BACKEND` (`inprocess` default | `nats-kv`), falling back to in-process if the bucket can't open. The proxy already ships `agent_history` inside the `PolicyInput`, so adding `recent_sequence` to the policy-engine's `AgentHistory` (`#[serde(default)]`) flows it to Rego unchanged — the whole input *is* the Rego input. `governance.rego` gains a `deny` rule: current `tool_type` in `external_egress_tools` + a `recent_sequence` event whose tool is in `sensitive_read_tools` within `kill_chain_window_ms` ⇒ deny with a `kill chain — …` reason (window checked against the proxy-stamped `current_time` for determinism). Fail-open throughout: an empty/absent sequence (older proxy, NATS blip) never fires the rule, so the breaker only *adds* denies on top of the single-replica floor. dev e2e: `clavenar-e2e/dev/run-killchain.sh` + JetStream enabled in `nats-server.conf`.
+
+**Verify.**
+
+```bash
+cargo test --manifest-path repos/clavenar-policy-engine/Cargo.toml --test temporal_test kill_chain
+cargo test --manifest-path repos/clavenar-proxy/Cargo.toml --lib history
+# live (stack up): CLAVENAR_PROXY_HISTORY_BACKEND=nats-kv via the override
+repos/clavenar-e2e/dev/run-killchain.sh
+```
+
 ---
 
 ## 2. HIL — human-in-the-loop
