@@ -1374,16 +1374,16 @@ cargo run -p clavenar-sandbox-cli -- --method tools/call --params '{"name":"shel
 cd repos/clavenar-typescript-sdk && npm test
 ```
 
-### 10.6 Python SDK (`clavenar-ai`)
+### 10.6 Python SDK (`clavenar-agent-sdk`)
 
 **Concept.** Mirror of §10.5 for the Python ecosystem — wraps `AsyncAnthropic` / `AsyncOpenAI` plus the sync `Anthropic` / `OpenAI` clients. 1:1 parity with the TS SDK plus a synchronous flavour because not every Python agent codebase is asyncio.
 
-**Implementation.** `repos/clavenar-ai-py/`, published as `clavenar-ai` on PyPI. Streaming (both providers, async + sync); retries with jittered exponential backoff; parallel `tool_use` observability via `asyncio.gather`; `ClavenarPending.resolve()` end-to-end. `ClavenarDenied` / `ClavenarPending` / `ClavenarTransportError` exception hierarchy matches TS. 43 unit tests; `ruff` + `mypy --strict` clean.
+**Implementation.** `repos/clavenar-python-sdk/`, published as `clavenar-agent-sdk` on PyPI. Streaming (both providers, async + sync); retries with jittered exponential backoff; parallel `tool_use` observability via `asyncio.gather`; `ClavenarPending.resolve()` end-to-end. `ClavenarDenied` / `ClavenarPending` / `ClavenarTransportError` exception hierarchy matches TS. 43 unit tests; `ruff` + `mypy --strict` clean.
 
 **Verify.**
 
 ```bash
-cd repos/clavenar-ai-py && pip install -e . && pytest
+cd repos/clavenar-python-sdk && pip install -e . && pytest
 ```
 
 ### 10.7 Framework recipes + Computer Use + Realtime adapters
@@ -1393,7 +1393,7 @@ cd repos/clavenar-ai-py && pip install -e . && pytest
 **Implementation.** Spread across both SDK repos:
 
 - `clavenar-typescript-sdk/examples/` — `native-anthropic/`, `native-openai/`, `vercel-ai/`, `mastra/`, `langchain-js/`, `openai-realtime/`, `anthropic-computer-use/`. Realtime ships `inspectRealtimeFunctionCall` / `isRealtimeFunctionCallDone` / `normalizeRealtimeFunctionCall` helpers for the WS pump pattern; Computer Use tool_use blocks already flow through `clavenarWrap` unchanged, so its recipe is wiring + a starter Rego snippet.
-- `clavenar-ai-py/examples/` — `langchain_recipe.py`, `llamaindex_recipe.py`, `computer_use_recipe.py`, `openai_realtime_recipe.py`. Python helpers under `clavenar_ai.realtime`. Uses the canonical `inspect_tool_use(NormalizedToolCall, opts)` signature end-to-end including the `ClavenarPending.resolve()` raise-on-deny contract.
+- `clavenar-python-sdk/examples/` — `langchain_recipe.py`, `llamaindex_recipe.py`, `computer_use_recipe.py`, `openai_realtime_recipe.py`. Python helpers under `clavenar_agent_sdk.realtime`. Uses the canonical `inspect_tool_use(NormalizedToolCall, opts)` signature end-to-end including the `ClavenarPending.resolve()` raise-on-deny contract.
 
 All recipes pass their respective type checkers (TS strict mode, mypy strict). 98 + 61 tests respectively across the two SDKs.
 
@@ -1401,7 +1401,7 @@ All recipes pass their respective type checkers (TS strict mode, mypy strict). 9
 
 ```bash
 cd repos/clavenar-typescript-sdk/examples/native-anthropic && npm install && npm start
-cd repos/clavenar-ai-py/examples && python langchain_recipe.py
+cd repos/clavenar-python-sdk/examples && python langchain_recipe.py
 ```
 
 ### 10.8 One-click deploy (Fly.io)

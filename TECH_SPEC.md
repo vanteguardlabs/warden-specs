@@ -3516,7 +3516,7 @@ Every non-2xx the data plane returns to a caller — `clavenar-proxy`'s
 one JSON envelope (`Content-Type: application/json`). It tells the caller
 which stage rejected the request, why, and which `correlation_id` to
 quote when pulling the audit row. The full edition and Lite share the
-shape; the SDKs (`clavenar-sdk`, `@clavenar/agent-sdk`, `clavenar-ai-py`)
+shape; the SDKs (`clavenar-sdk`, `@clavenar/agent-sdk`, `clavenar-python-sdk`)
 parse it into their typed `Veto` / `ClavenarDenied` surfaces.
 
 ```json
