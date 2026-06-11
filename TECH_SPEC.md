@@ -1424,6 +1424,7 @@ The catalog is the static source of truth in `clavenar-ledger/src/compliance.rs`
 |---|---|---|---|
 | `EU-AI-Act-Article-14` | EU AI Act | HIL human decisions (`approver_assertion` / non-system `policy_decision.decided_by`) + channel provenance (`policy_decision.approver_provenance`) | every recorded human decision rode an **attested** channel — provenance `webauthn` / `oidc` / `saml`. An assertion alone never satisfies (a forged session or auth-disabled bypass can mint one); `system` and `auth-disabled` rows are excluded from the human count entirely and tagged in `provenance_summary` |
 | `EU-AI-Act-Article-15` | EU AI Act | deny-signal distribution + chain-verify pass + signed-denial coverage | chain verifies and every denial is signed |
+| `EU-AI-Act-Article-50` | EU AI Act | interaction-logging substrate (chain validity + row count) | every agent interaction recorded on a verified chain (the logging Art 50 disclosures rely on) |
 | `ISO-27001-8.13` | ISO/IEC 27001 | chain continuity + overlapping cold-tier export snapshots | chain verifies and ≥1 export overlaps the window |
 | `SOC2-CC7.2` | SOC 2 | deny-signal distribution non-empty + verdict rows present | requests monitored and ≥1 anomaly signal seen |
 | `SOC2-CC7.3` | SOC 2 | presence of HIL human-review rows | ≥1 security event reached human evaluation |
@@ -2209,11 +2210,22 @@ GET    /cases?[status=]&[limit=]   → [CaseRecord]   (newest-first, limit ≤ 1
 GET    /cases/{id}                 → { case: CaseRecord, evidence: [LedgerEntry] }
 POST   /cases/{id}/timeline        TimelineEvent     → 204
 POST   /cases/{id}/status          { status }        → 204   (open|contained|closed)
+POST   /cases/{id}/classify        { severity }      → { severity, regulatory_deadline }
 POST   /cases/{id}/attach          { agent_ids[], correlation_ids[] } → 204
 ```
 
 `CaseRecord` = `{ id, title, status, created_at, updated_at, agent_ids,
-correlation_ids, timeline: [{at,kind,actor,detail}] }`. `GET /cases/{id}`
+correlation_ids, timeline: [{at,kind,actor,detail}], severity?,
+regulatory_deadline? }`.
+
+**EU AI Act Art 73 classification.** `POST /cases/{id}/classify` sets an
+incident severity tier and stamps the authority-notification deadline =
+now + the tier's window: `serious` → 15 days, `death` → 10 days,
+`critical_infra` (widespread infringement / serious-and-irreversible
+critical-infrastructure disruption) → 2 days (Art 73(2)(a)–(c)). The
+classification + deadline persist on the case and append a `classified`
+timeline event; the console renders a severity badge + deadline on the
+case detail. `GET /cases/{id}`
 expands evidence by reading each `correlation_id` (`read_for_correlation`)
 and `agent_id` (`read_for_agent`) through the backend-agnostic store,
 merging + deduping by entry id, newest-first, capped at 500 rows.
