@@ -2130,6 +2130,63 @@ drafts skip the candidate-engine build step entirely — the body
 still passes `validate()`, but compose-time composition against the
 active bundle is deferred until activation.
 
+### 7.7 Fleet incident hunt
+
+Hunting an incident across the fleet was one `/audit/{agent_id}` call
+per agent. `GET /audit/hunt` collapses that into a single server-side
+aggregation: every agent with a row in the filtered window rolls up to
+one line, worst-signal first.
+
+**`GET /audit/hunt` (ledger, internal mTLS router)**
+
+```
+GET /audit/hunt?[method=<m>]&[signal=<s>]&[authorized=<bool>]
+              &[from=<rfc3339>]&[to=<rfc3339>]
+              &limit=<n>                       // clamped to [1, 1000]
+```
+
+All filters optional. A malformed RFC 3339 bound or an inverted
+window (`from > to`) is a `400`. Response:
+
+```json
+{
+  "agents": [
+    {
+      "agent_id": "agent-bulk-7",
+      "agent_name": null,
+      "hit_count": 42,
+      "deny_count": 9,
+      "worst_signal": "egress_violation",
+      "latest_hit_ts": "2026-06-11T13:02:11Z",
+      "methods": ["tools/call", "tools/list"]
+    }
+  ],
+  "returned": 1,
+  "from": "2026-06-11T11:00:00Z",
+  "to": null
+}
+```
+
+One `SELECT … GROUP BY agent_id` over the window does the work — not a
+per-agent loop. `worst_signal` is the highest-severity signal the
+agent emitted, ranked by a fixed severity table
+(`clavenar-ledger/src/reads.rs::SIGNAL_SEVERITY`); the order is a
+triage heuristic, not a security claim (`signal` is non-hashable
+forensic metadata). `deny_count` is the subset with
+`authorized = false`; `methods` is the distinct method set; rows order
+worst-signal then hit-count.
+
+**Internal-only by design.** The rollup enumerates `agent_id` across
+the whole fleet (like `/agents`), and the `GROUP BY agent_id`
+collapses `correlation_id`, so the per-row demo-prefix filter cannot
+post-scope it — public placement would leak every tenant's agents.
+The route is on the mTLS listener; the console reaches it with its
+operator-authenticated client and renders the `/incidents/hunt` page
+(`require_viewer`). SQLite-only — the Postgres backend returns `503`,
+matching the other analysis reads. A `timestamp` index
+(`idx_entries_timestamp`) covers the window bound; `method` / `signal`
+/ `authorized` are unindexed, so the window is the selective filter.
+
 ### 8. Authorization
 
 Adds a third role to the existing two-role hierarchy in `clavenar-console/src/auth_session.rs`:
