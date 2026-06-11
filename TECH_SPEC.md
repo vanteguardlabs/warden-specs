@@ -1422,7 +1422,7 @@ The catalog is the static source of truth in `clavenar-ledger/src/compliance.rs`
 
 | Control | Framework | Derived from | `satisfied` when |
 |---|---|---|---|
-| `EU-AI-Act-Article-14` | EU AI Act | HIL human decisions (`approver_assertion` / non-system `policy_decision.decided_by`) | every recorded human decision carries an approver assertion |
+| `EU-AI-Act-Article-14` | EU AI Act | HIL human decisions (`approver_assertion` / non-system `policy_decision.decided_by`) + channel provenance (`policy_decision.approver_provenance`) | every recorded human decision rode an **attested** channel — provenance `webauthn` / `oidc` / `saml`. An assertion alone never satisfies (a forged session or auth-disabled bypass can mint one); `system` and `auth-disabled` rows are excluded from the human count entirely and tagged in `provenance_summary` |
 | `EU-AI-Act-Article-15` | EU AI Act | deny-signal distribution + chain-verify pass + signed-denial coverage | chain verifies and every denial is signed |
 | `ISO-27001-8.13` | ISO/IEC 27001 | chain continuity + overlapping cold-tier export snapshots | chain verifies and ≥1 export overlaps the window |
 | `SOC2-CC7.2` | SOC 2 | deny-signal distribution non-empty + verdict rows present | requests monitored and ≥1 anomaly signal seen |
@@ -1437,11 +1437,25 @@ The catalog is the static source of truth in `clavenar-ledger/src/compliance.rs`
 
 `/compliance/evidence` is the cheap live read the console `/compliance` page renders and re-polls. The `?include_compliance=true` flag on the existing bundle embeds the same register as a signed artifact (one signing path, one tamper-evident container) and widens `article_scope` to include Articles 14 + 15. Both go through one derivation function so the live view and the bundled artifact agree byte-for-byte for the same window. `/compliance/evidence` sits on the ledger's internal mTLS listener only (stripped from the plain `:8083` port exactly like `/export*`). Half-open window `[from, to)`; empty window → `200` with every control `no_data`; inverted/malformed window → `400`.
 
-### 4. Register schema (v1)
+### 4. Register schema (v2)
+
+Schema v2 (additive over v1): the Article-14 `metric` gains `attested`
+and a `provenance_summary` map counting every decision row by its
+HIL-stamped channel provenance — `webauthn`, `oidc`, `saml`,
+`basic-admin`, `demo-session`, `bearer`, `teams-card`, `system`,
+`auth-disabled`, or `unrecorded` for rows that pre-date provenance
+tracking. Provenance is derived server-side in HIL from the verified
+principal at decide time and rides inside the forensic event's
+`policy_decision` object; it is never read from a request body. The
+demo simulator's auto-decider authenticates through the bearer path
+with a `system:<name>` stamp (provenance `system`), and the whole
+sidecar sits behind the simulator's `hil-sidecar` cargo feature so a
+production build can compile it out (`--no-default-features`; compose
+exposes it as the `CARGO_BUILD_FLAGS` build arg).
 
 ```jsonc
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "generated_at": "<RFC 3339 UTC>",
   "window": { "from": "...", "to": "..." },
   "row_count": 1234,
