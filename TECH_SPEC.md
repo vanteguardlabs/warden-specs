@@ -2254,13 +2254,17 @@ The console renders this at `/incidents` (list) and `/incidents/{id}`
 CN → registry UUID and suspends it via identity (the shipped revocation
 denylist kills in-flight traffic), recording each result on the case
 timeline — partial success, one agent's failure never aborts the rest.
+It then auto-denies every still-pending HIL row whose agent is on the
+case (over the bulk-decide rails, joined on the proxy-derived agent
+name) so a contained agent leaves no approvable action in the queue.
 Containment uses **suspend** (reversible). **Decommission** (`POST
 /incidents/{id}/decommission`, **admin-gated**, behind an explicit
 confirm dialog carrying an operator reason) is the terminal escalation:
 it permanently retires each case agent via identity decommission (no
 revocation broadcast — the SVID is terminally void), encoding the
 terminal fact in distinct timeline kinds while the case status stays
-`contained` (the status enum is closed). Case export
+`contained` (the status enum is closed); like containment, it auto-denies
+the retired agents' linked HIL pendings. Case export
 (`GET /incidents/{id}/export`) bundles the case + evidence as a
 downloadable JSON report.
 
