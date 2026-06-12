@@ -4315,6 +4315,22 @@ marker travels with the scores when drift is structurally absent
 (bigram fallback / no persona baseline) so consumers render "n/a"
 rather than a measured-looking 0%.
 
+**Inspection cost rides separately, non-hashable (FinOps).** The Brain
+sums the PriceTable-estimated micro-USD cost of the *priced completion*
+calls each `/inspect` makes (classifier, injection, malicious-code,
+compromised-package, PII-mask — embedding/drift spend is excluded, it
+carries no PriceTable entry) and returns it as `cost_micros` on
+`InspectionResponse`, **outside** `BrainEvidence` so the v4 evidence
+hash is unchanged. The proxy stamps it onto the forensic row as the
+ledger's non-hashable `cost_micros` column (same posture as `signal` —
+no chain bump) and prefers it over the flat
+`CLAVENAR_PROXY_REQUEST_COST_MICROS` estimate when feeding the
+policy-engine budget breaker. It is an **estimate, never billed cost**,
+and is structurally `0` in mock mode (no provider call fires), so
+`SUM(cost_micros)` per agent stays zero until a real provider key +
+price file are configured — a populated `0` column (not NULL) is the
+honest mock-mode reading.
+
 #### Information disclosure
 
 The Brain calls a configured **inspector LLM** (separate model from any

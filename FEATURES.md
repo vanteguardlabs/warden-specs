@@ -766,6 +766,8 @@ End-to-end coverage in `./repos/clavenar-e2e/dev/run-policies.sh` (see §11.7).
 
 **Implementation.** `clavenar-console` `/stats/cost-latency` route. Env vars: `CLAVENAR_CONSOLE_METRICS_URLS` (comma list of `{name}={url}` pairs; sensible localhost defaults), `CLAVENAR_CONSOLE_TOOL_COSTS=tool:$/call,…`. Pure-Rust Prometheus scraper at `clavenar-console/src/metrics_scrape.rs` — no `prometheus-parse` dependency (its strictness rejects our `# HELP` formatting in places). Cost rollup queries `clavenar-ledger`'s `/audit` for the 24h window per configured tool.
 
+**Real per-request inspection cost (`cost_micros`).** Beyond the operator-supplied tool estimate, every proxied request now carries an *attributed* inspection-spend figure. The Brain sums the PriceTable-estimated micro-USD cost of the priced detector LLM calls one `/inspect` makes and returns it on `InspectionResponse`; the proxy stamps it onto the forensic row's non-hashable `cost_micros` ledger column (no chain bump) and feeds the same number to the policy-engine budget breaker in place of a flat env estimate. So `SELECT agent_id, SUM(cost_micros) FROM entries GROUP BY agent_id` is real attributed inspection spend — an *estimate, never billed cost*, and structurally `0` on a mock-mode box (no provider call fires) until a real key + price file are wired. (The unified shared price model that lets this dashboard read the column directly is a follow-up that rides with a later dashboard upgrade.)
+
 **Verify.**
 
 ```bash
