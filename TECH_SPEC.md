@@ -3153,7 +3153,11 @@ synthetic `demo-<6hex>` agent + `demo-<prefix>-assurance` lane, computed
 fresh per request. The methodology — including the explicitly
 **not-folded-in** signals (brain/policy degraded gauges and blast-radius
 envelope tightness, which are operational metrics that do not land on
-the audit chain) — is published beside the gauge.
+the audit chain) — is published beside the gauge. Blast-radius envelope
+tightness ships as its own standalone operational gauge on `/agents`
+(the Blast-Radius Autopilot fleet "% of granted scope unused" metric,
+FEATURES §4.16); it stays out of this composite by design — folding it in
+would silently change the posture-score methodology.
 
 ---
 

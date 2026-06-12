@@ -656,13 +656,13 @@ open http://localhost:8085/hil
 
 **Concept.** Browse and manage the agent registry without dropping to the CLI. Shows the lifecycle state badge, owner team, scope counts, last activity (joined from the latest ledger row). Click into `/agents/{id}` for the full record + lifecycle timeline (every chain v3 row for this agent, newest first).
 
-**Implementation.** `clavenar-console` `/agents`, `/agents/new`, `/agents/{id}`. Reads from `clavenar-identity` via `clavenar-sdk::AgentsClient`. htmx action buttons gated on caller capability (`agents:admin` for widen, owner-team-or-admin for narrow, etc.). The form on `/agents/new` dropdowns the caller's `groups` claim for `owner-team` so users can't pick teams they don't belong to.
+**Implementation.** `clavenar-console` `/agents`, `/agents/{id}`. Reads from `clavenar-identity` via `clavenar-sdk::AgentsClient`. The one **mutating** console action is the Blast-Radius one-click envelope narrow on `/agents/{id}` (§4.16), Admin-gated and forwarded under the operator token's `agents:admin` capability; the remaining lifecycle writes (register / suspend / widen / decommission) stay on `clavenarctl` until the console gains its own OIDC auth-code flow.
 
 **Verify.**
 
 ```bash
 open http://localhost:8085/agents
-open http://localhost:8085/agents/new
+open http://localhost:8085/agents/{id}
 ```
 
 The audit page (`/audit`) gains an "Agent" column linkable to `/agents/{id}` if registered.
@@ -835,6 +835,21 @@ curl -s http://localhost:8085/_partials/posture   # the htmx-loaded gauge partia
 # (demo session required) fire a scenario, then:
 open http://localhost:8085/demo                   # each card now opens the run-down
 curl -s http://localhost:8085/demo/pipeline/<cid> # chain rows JSON (prefix-gated)
+```
+
+---
+
+### 4.16 Blast-Radius Autopilot — measured least privilege
+
+**Concept.** The ledger holds a tamper-evident per-agent record of which tools an agent *actually used*; identity holds the `scope_envelope` it was *provisioned* for. Joining the two surfaces **over-provisioning**: scopes an agent was granted but never exercises — dead blast radius an attacker who lands the agent inherits for free. The per-agent page flags those never-used scopes as narrow candidates with confidence bars; one click narrows the envelope down to the used set. `/agents` headlines a board-grade fleet gauge: **"% of granted tool scopes unused"** across the fleet. The apply step is **chain-anchored and auditor-verifiable** — the narrow lands as an `agent.envelope_narrowed` row carrying the recommendation reason. Compliance framing is SOC2 CC6.1/CC6.3 + NIST MANAGE, deliberately **not** an EU Art 14 (human-oversight) claim — this is least privilege, not oversight.
+
+**Implementation.** Per-agent panel: `clavenar-console` joins `clavenar-ledger`'s `GET /analysis/agent-envelope-recommendations` (windowed distinct-tool usage, keyed on the cert CN the proxy stamps — **not** the identity UUID) against the agent's `scope_envelope` from identity. **One-click narrow** is the console's single agent mutation: `POST /agents/{id}/envelope/narrow` re-reads the live envelope, recomputes the used set server-side (so a concurrent edit can only ever shrink, never widen, the applied set), and forwards the **full new envelope** plus a `reason` to identity's narrow endpoint under the operator token's `agents:admin` capability — Admin-gated, mirroring `/policies` mutations; a no-op narrow short-circuits before the call. The fleet gauge (`GET /_partials/fleet-scope-waste`) is a console-side aggregation — the provisioned denominator lives only in identity, the used numerator only in the ledger, so the join is necessarily console-side — over a 60 s background-warmed cache so the ~fleet-sized ledger fan-out never lands on the page render; it reuses the `Gauge` chart-kit helper (higher-is-worse, amber 40% / rose 70% unused) and is **deliberately not folded into the §4.14 fleet posture score** (it is an operational metric that does not land on the audit chain). An operator-side narrated walkthrough (`/agents/{id}?walkthrough=1`) anchors numbered steps to the live panel, the narrow button, and the chain row; the `/demo` page carries a labeled-static least-privilege explainer card (an operator capability, not a visitor-fireable live verdict). `clavenar-simulator` personas enroll with realistic over-provisioned envelopes (their tool mix plus a few never-fired high-blast-radius scopes) so the panel and gauge read genuine narrow candidates.
+
+**Verify.**
+
+```bash
+open http://localhost:8085/agents                 # fleet "% of granted scope unused" gauge
+open "http://localhost:8085/agents/{id}?walkthrough=1"  # narrated least-privilege tour + Narrow button
 ```
 
 ---
