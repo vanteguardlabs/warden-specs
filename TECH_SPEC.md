@@ -18,6 +18,7 @@ Consolidated technical record for Clavenar. Each major section below was previou
 - [Policy catalog](#policy-catalog) — browseable on-disk library of starter policies with frontmatter-driven metadata, one-click install, and a CLI scaffolder
 - [Policy exchange](#policy-exchange) — signed, versioned Rego packs gated by a mandatory local attack-catalog backtest before install
 - [Forensic-tier deep review](#forensic-tier-deep-review) — async heavy-LLM auditor running against a sampled slice of the audit stream
+- [Continuous assurance](#continuous-assurance) — scheduled breach-and-attack daemon firing the catalog at the live proxy; per-category coverage scorecard on chain
 - [Internal service mTLS](#internal-service-mtls) — agreed substrate for proxy↔backend hops (shipped v0.8.3 — application hops; v0.8.4 — NATS transport)
 - [Workload SVID refresh](#workload-svid-refresh) — short-lived per-service SVIDs minted on top of the bootstrap cert (shipped — `clavenar-workload-identity`, hot-reload via ArcSwap + peer-SPIFFE SAN check)
 - [Agent-facing error envelope](#agent-facing-error-envelope) — the shared JSON 403/429/503 body the data plane returns to callers
@@ -49,6 +50,7 @@ authoritative wire-contract detail still lives in those sections.
 | 9 | [Policy catalog](#policy-catalog) | shipped | — | `clavenar-policy-engine` (frontmatter + 4 endpoints), `clavenar-console` (`/policies/library`), `clavenar-sdk`, `clavenar-ctl` (`policy scaffold` + `policy library`) |
 | 9a | [Policy exchange](#policy-exchange) | shipped | v1.3.0 | `clavenar-sdk` (pack manifest + `PackSigner`), `clavenar-chaos-catalog` (`policy_input` corpus), `clavenar-ctl` (`policy exchange {sign,install}`); reuses `/sign/blob` + `evaluate-batch` |
 | 10 | [Forensic-tier deep review](#forensic-tier-deep-review) | shipped 2026-05-13 | v0.6.0 | `clavenar-deep-review` (new repo), `clavenar-e2e`, `clavenar-charts` (chart 0.7.0 — eight-service stack, shipped 2026-05-14) |
+| 10a | [Continuous assurance](#continuous-assurance) | shipped | v1.21.0 | `clavenar-chaos-monkey` (new `clavenar-assurance-daemon` bin), `clavenar-e2e`, `clavenar-console` (`/assurance`), `clavenar-ctl` (`assurance diff`), `clavenar-ledger` (no change — v1 `assurance_run` rows) |
 | 11 | [Internal service mTLS](#internal-service-mtls) | shipped (apps v0.8.3 → NATS v0.8.4 → six sessions through 2026-05-14) | v0.8.3, v0.8.4 | every backend (`clavenar-proxy`, `clavenar-brain`, `clavenar-policy-engine`, `clavenar-ledger`, `clavenar-hil`, `clavenar-identity`, `clavenar-console`, `clavenar-simulator`) — every internal application hop is now mTLS-gated; NATS transport pinned TLS+mTLS in v0.8.4 |
 | 11a | [Kill-chain breaker](#kill-chain-breaker) | shipped | v1.3.0 | `clavenar-proxy` (NATS-KV shared history store), `clavenar-policy-engine` (`recent_sequence` + governance.rego rule), `clavenar-e2e` (JetStream + `run-killchain.sh`) |
 | 12 | [Workload SVID refresh](#workload-svid-refresh) | **shipped** | `clavenar-workload-identity` | `clavenar-identity` (issuer), every internal service (consumer) |
@@ -2969,6 +2971,109 @@ The architectural decisions resolved by `/grill-me`:
 6. Per-event soft-fail with three sentinel types (not at-least-once durable redelivery, not best-effort silent drop).
 7. In-tree regex PII masker at MVP (not path-dep on brain's masker — deferred swap with documented rationale).
 8. Page on Red + high-confidence only, rate-limited per agent; no auto-block (async detection + auto-block is a self-DoS waiting to happen).
+
+---
+
+## Continuous assurance
+
+Breach-and-attack simulation as a standing surface. The
+`clavenar-chaos-monkey` repo ships a second binary,
+`clavenar-assurance-daemon`, that fires the chaos catalog at the **live
+proxy** on a cadence and lands a per-category coverage scorecard on the
+audit chain. Where [deep review](#forensic-tier-deep-review) audits the
+traffic the fleet *actually* produced, continuous assurance proves the
+pipeline still catches the attacks it is *supposed* to — and notices
+when a policy edit, model swap, or config change silently drops a
+detection category.
+
+### The daemon
+
+Paused-daemon posture, mirroring the simulator: boots idle
+(`CLAVENAR_ASSURANCE_START_RUNNING=false`) and fires only after the
+operator `POST /running {running:true}` or `POST /run-now` on its admin
+port (`/health`, `/status`, `/running`, `/run-now`). Once running, a
+`tokio::time::interval` (`CLAVENAR_ASSURANCE_INTERVAL_SECS`, default
+86 400 = daily) fires each tick. It presents the generic agent client
+cert (`client.{crt,key}`) for both the proxy mTLS call and the NATS
+publish.
+
+Two catalog categories are excluded from the scheduled lane by default:
+**velocity** (a scheduled run would trip the live proxy's per-agent
+velocity window and contaminate real-traffic counters — opt back in with
+`CLAVENAR_ASSURANCE_INCLUDE_VELOCITY=true`) and **hil** (those cases need
+a HIL URL + forged session cookie the daemon doesn't wire; firing them
+unconfigured would record false misses). The proxy-targeted `identity`
+cases still fire — they don't need the identity-service scenarios.
+
+### The `assurance_run` chain event
+
+One event per run, carried inside the existing `LogRequest` envelope on
+the `clavenar.forensic` subject — **no ledger wire-format change**, the
+exact pattern [deep review](#forensic-tier-deep-review) uses for its
+findings. The structured rollup lives in the **hashable**
+`policy_decision` blob, so the per-category numbers are tamper-evident:
+re-running `GET /verify` recomputes the chain over them. No v2/v3/v4
+fields are set, so the row appends as **chain v1** and the ledger needs
+no new code to accept it.
+
+```jsonc
+{
+  "agent_id": "assurance-monkey",      // demo lane: "demo-<prefix>-assurance"
+  "method": "assurance_run",
+  "intent_category": "Assurance::42/44",
+  "authorized": false,                 // true ⇔ every fired case detected
+  "reasoning": "[assurance v1.21.0] 42/44 catalog cases detected across 7 categories",
+  "signal": "assurance_run",
+  "policy_decision": {
+    "kind": "assurance_run",
+    "run_id": "<uuid v4>",
+    "version": "1.21.0",               // the release the run fired under
+    "total": 44,
+    "passed": 42,
+    "categories": [
+      { "category": "denylist", "fired": 6, "detected": 6, "pct": 1.0 },
+      { "category": "injection", "fired": 4, "detected": 3, "pct": 0.75 }
+    ]
+  }
+  // demo lane only: "correlation_id": "<prefix>-<uuid>"
+}
+```
+
+The scorecard key space is the **`clavenar-chaos-catalog` `Category`
+strings** (`denylist`, `injection`, `velocity`, `business_hours`,
+`control`, `hil`, `attestation`, `identity`, `supply_chain`) — no new
+enum. Detection % per category is `detected / fired`, where `detected`
+counts outcomes whose observed proxy verdict matched the catalog's
+expected verdict.
+
+### Surfaces
+
+- **Coverage scorecard** — console `/assurance`: latest per-category
+  detection %, an overall coverage gauge, a per-category trend sparkline
+  across recent runs, and a **regression banner** when a category's
+  latest % drops below its floor (deterministic gates — `control`,
+  `denylist`, `attestation` — floor at 1.0; heuristic / env-varying
+  categories get headroom). Viewer-gated; demo-scoped to
+  `demo-<prefix>-assurance` when a demo-session cookie is present.
+- **Per-release coverage diff** — `clavenarctl assurance diff
+  --from-version X --to-version Y` (and the console `/assurance?from=&to=`
+  view) group on-chain `assurance_run` rows by their `version` field,
+  pick the latest run per version, and diff per-category %. This is the
+  **chain-anchored auditor artifact**: every number traces to an on-chain
+  row (the report carries each version's run `seq`), so the auditor
+  re-verifies the evidence with `clavenarctl regulatory verify` /
+  `GET /verify`. The ctl command exits non-zero on a regression so a CI
+  gate can fail a release.
+- **Demo assurance lane** — a demo visitor fires a session-scoped run
+  from `/demo` (`POST /demo/assurance/fire` → daemon
+  `POST /run-now?demo_prefix=<8hex>`). The event's `agent_id` becomes
+  `demo-<prefix>-assurance` (so the simulator's `demo-` skip filter
+  leaves it alone) and its `correlation_id` carries the prefix as its
+  first UUID group (so the ledger's demo read filter scopes the row to
+  that visitor). **Honest scope:** the lane lands real fired-attack
+  scorecards on chain today; feeding them into a headline *posture
+  score* is deferred to the (unbuilt) *Live pipeline theater* surface
+  that owns the posture number.
 
 ---
 
