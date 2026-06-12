@@ -42,8 +42,8 @@ authoritative wire-contract detail still lives in those sections.
 | 3 | [Tenancy scope](#tenancy-scope) | described | — | (semantics, no new service) |
 | 4 | [Console config page](#console-config-page) | shipped | — | `clavenar-console`, `clavenar-sdk` (+3 public getters) |
 | 5 | [Operator authentication](#operator-authentication) | shipped | — | `clavenar-hil` (passkey + session), `clavenar-console` (auth-mode + viewer/approver gates) |
-| 6 | [Regulatory export](#regulatory-export) | shipped (slices 1+2+3) | — | `clavenar-ledger`, `clavenar-identity` (new `POST /sign/blob`), `clavenar-sdk`, `clavenar-ctl` |
-| 6a | [Continuous compliance evidence](#continuous-compliance-evidence) | shipped | v1.3.0 | `clavenar-ledger` (`POST /compliance/evidence`, manifest v4), `clavenar-sdk`, `clavenar-console` (`/compliance`), `clavenar-ctl` (`--include-compliance`) |
+| 6 | [Regulatory export](#regulatory-export) | shipped (manifest v6) | — | `clavenar-ledger` (chain v4 evidence rows; backend-agnostic core), `clavenar-identity` (`POST /sign/blob`), `clavenar-sdk`, `clavenar-ctl` |
+| 6a | [Continuous compliance evidence](#continuous-compliance-evidence) | shipped | v1.3.0 | `clavenar-ledger` (`POST /compliance/evidence`, manifest v6, runs on Postgres too), `clavenar-sdk`, `clavenar-console` (`/compliance`), `clavenar-ctl` (`--include-compliance`) |
 | 7 | [Demo experience](#demo-experience) | shipped | — | `clavenar-website`, `clavenar-demo-mint` (new), `clavenar-console`, `clavenar-proxy`, `clavenar-hil`, `clavenar-ledger`, `clavenar-chaos-catalog` (new), `clavenar-simulator` |
 | 8 | [Console policy management](#console-policy-management) | shipped | — | `clavenar-policy-engine` (SQLite store + write API), `clavenar-console`, `clavenar-sdk`, `clavenar-ledger` (consumes `policy.*` event kinds — chain v3 is event-kind-polymorphic, no schema bump) |
 | 9 | [Policy catalog](#policy-catalog) | shipped | — | `clavenar-policy-engine` (frontmatter + 4 endpoints), `clavenar-console` (`/policies/library`), `clavenar-sdk`, `clavenar-ctl` (`policy scaffold` + `policy library`) |
@@ -187,7 +187,7 @@ This is the highest-value bullet — non-repudiation is what unlocks the §15 "t
 ```mermaid
 flowchart LR
   Row[Ledger row N — id, timestamp, agent_id, agent_spiffe, method, intent_category, authorized, reasoning, policy_decision, signature, key_id, seq, prev_hash]
-  Hashable[Canonical JSON — hashable subset, dispatched by chain_version v1 or v2 or v3]
+  Hashable[Canonical JSON — hashable subset, dispatched by chain_version v1 or v2 or v3 or v4]
   Hash[SHA-256]
   Entry[entry_hash N]
   Next[Row N+1 — prev_hash = entry_hash N]
@@ -572,7 +572,7 @@ The signal vocabulary on the forensic event uses `unregistered_agent` (consisten
 
 ### 7. Chain v3 — lifecycle row anchoring
 
-`CURRENT_CHAIN_VERSION = 3` after this lands. v1 (verdict, no signature), v2 (verdict + signature), and v3 (lifecycle event) coexist in the chain; verifier dispatches per-row. No retroactive re-signing.
+`CURRENT_CHAIN_VERSION = 3` after this lands. v1 (verdict, no signature), v2 (verdict + signature), and v3 (lifecycle event) coexist in the chain; verifier dispatches per-row. No retroactive re-signing. *(A later increment added **v4** — verdict rows carrying the Brain's deterministic evidence (`brain_evidence_sha256`, EU AI Act Art 12; see [Layer 2 — clavenar-brain](#layer-2--clavenar-brain)). `CURRENT_CHAIN_VERSION = 4` today; a v4 verdict row commits to the evidence in place of the v2 signature, which still persists and stays JWKS-verifiable. Art 12 is record-keeping, not non-repudiation.)*
 
 #### 7.1 Two-tier hashable
 
@@ -1286,8 +1286,9 @@ The existing `/export` produces Parquet for analytics; no auditor expects to rea
 
 ### 2. Articles in scope
 
-- **EU AI Act Article 11** (technical documentation) and **Article 12** (automatic logging records) only.
-- **Articles 14-15** (human oversight, accuracy) are now **auto-derived** from chain facts by the [Continuous compliance evidence](#continuous-compliance-evidence) module; slice 3's operator prose remains available for narrative an auditor wants on top. `?include_compliance=true` embeds the derived register and widens this bundle's `article_scope` to cover 14 + 15 (manifest v4).
+- **EU AI Act Article 11** (technical documentation) and **Article 12** (automatic logging records) are the base scope; Article 12 record-keeping is reinforced by the **chain v4 Brain-evidence rows** (deterministic verdict inputs; see [Layer 2](#layer-2--clavenar-brain)).
+- **Articles 14-15** (human oversight, accuracy) are **auto-derived** from chain facts by the [Continuous compliance evidence](#continuous-compliance-evidence) module; the operator prose remains available for narrative an auditor wants on top. `?include_compliance=true` embeds the derived register and widens this bundle's `article_scope` to cover 14 + 15.
+- **Annex IV** (technical-documentation coverage) and **Article 72** (post-market monitoring plan) are optional, auto-derived bundle blocks (`?annex_iv=true`, `?include_post_market_plan=true`), each widening `article_scope` when present. Annex IV is a *coverage assertion* (which elements the bundle's chain + register evidence substantiates), not a conformity declaration; elements that remain operator deliverables are marked as such.
 - **GDPR Article 30** has a different surface (data categories, recipients) and isn't auto-derivable from forensic events; deferred until a buyer asks.
 
 ### 3. Bundle format
@@ -1295,13 +1296,15 @@ The existing `/export` produces Parquet for analytics; no auditor expects to rea
 `.tar.gz` containing:
 
 ```
-manifest.json                 — schema v5, signed
-manifest.sig                  — detached ed25519 sig (128 hex chars + LF)
-entries.ndjson                — one LedgerEntry per line, seq ASC
-technical_documentation.md    — operator-supplied prose (optional)
-compliance_register.json      — auto-derived Art 14/15 register (optional)
-anchors.ndjson                — external chain-anchor proofs (optional)
-README.txt                    — auditor verification checklist (8 steps)
+manifest.json                     — schema v6, signed
+manifest.sig                      — detached ed25519 sig (128 hex chars + LF)
+entries.ndjson                    — one LedgerEntry per line, seq ASC
+technical_documentation.md        — operator-supplied prose (optional)
+compliance_register.json          — auto-derived Art 14/15 register (optional)
+anchors.ndjson                    — external chain-anchor proofs (optional)
+annex_iv_documentation.json       — EU AI Act Annex IV coverage (optional)
+post_market_monitoring_plan.json  — EU AI Act Article 72 plan (optional)
+README.txt                        — auditor verification checklist (10 steps)
 ```
 
 NDJSON over Parquet because the audience reaches for Python / Excel / `jq` more readily than Parquet tooling. Detached signature rather than embedded — keeps the `manifest.json` byte-stable across signing implementations. Half-open window `[from, to)`. Empty windows return a valid bundle with `row_count: 0` (auditors expect a verifiable artifact even for "we logged nothing"). Operator stores; Clavenar does not retain bundles server-side.
@@ -1315,11 +1318,11 @@ NDJSON over Parquet because the audience reaches for Python / Excel / `jq` more 
 
 `POST /export/regulatory` is the auditor-facing export. `POST /sign/blob` is the new signing primitive on clavenar-identity (sibling to `/sign`, same caller-allowlist gate, audience-tagged forensic event), wired via `CLAVENAR_IDENTITY_URL` + `CLAVENAR_LEDGER_SPIFFE` and routed through `clavenar-ledger::identity_client::ManifestSigner` / `HttpManifestSigner`.
 
-### 5. Manifest schema (v5)
+### 5. Manifest schema (v6)
 
 ```jsonc
 {
-  "schema_version": "5",
+  "schema_version": "6",
   "generated_at": "<RFC 3339 UTC>",
   "window": { "from": "...", "to": "..." },
   "row_count": 1234,
@@ -1366,15 +1369,25 @@ NDJSON over Parquet because the audience reaches for Python / Excel / `jq` more 
     "sha256": "...",
     "byte_size": 2048,
     "count": 3
+  },
+  "annex_iv": {                    // optional, v6, with ?annex_iv=true
+    "filename": "annex_iv_documentation.json",
+    "sha256": "...",
+    "byte_size": 3072
+  },
+  "post_market_monitoring_plan": { // optional, v6, with ?include_post_market_plan=true
+    "filename": "post_market_monitoring_plan.json",
+    "sha256": "...",
+    "byte_size": 2560
   }
 }
 ```
 
-The signature commits to `sha256(canonical_manifest_with_signature_blanked_to_null)` so `technical_documentation`, `parquet_pointers`, `compliance_register`, and `anchors` are signed transitively — tampering with any of them breaks both signature verification and a cheap recompute. v1 was the unsigned shape (slice 1); v2 added the `signature` envelope (slice 2); v3 added the optional `technical_documentation` and `parquet_pointers` blocks (slice 3); **v4** adds the optional `compliance_register` block (`{ filename, sha256, byte_size }`, committing to a bundled `compliance_register.json`; see [Continuous compliance evidence](#continuous-compliance-evidence)); **v5** adds the optional `anchors` block (`{ filename, sha256, byte_size, count }`, committing to a bundled `anchors.ndjson` of external chain-anchor proofs; see [External chain anchoring](#external-chain-anchoring)). Each version with its newest optional field unpopulated is byte-identical to the prior version aside from `schema_version`. The `anchors` field is declared last in the manifest so an anchorless bundle stays byte-identical to a v4 manifest.
+The signature commits to `sha256(canonical_manifest_with_signature_blanked_to_null)` so `technical_documentation`, `parquet_pointers`, `compliance_register`, `anchors`, `annex_iv`, and `post_market_monitoring_plan` are signed transitively — tampering with any of them breaks both signature verification and a cheap recompute. v1 was the unsigned shape (slice 1); v2 added the `signature` envelope (slice 2); v3 added the optional `technical_documentation` and `parquet_pointers` blocks (slice 3); **v4** added the optional `compliance_register` block (committing to a bundled `compliance_register.json`; see [Continuous compliance evidence](#continuous-compliance-evidence)); **v5** added the optional `anchors` block (committing to a bundled `anchors.ndjson` of external chain-anchor proofs; see [External chain anchoring](#external-chain-anchoring)); **v6** adds the optional `annex_iv` (EU AI Act Annex IV coverage assertion → `annex_iv_documentation.json`) and `post_market_monitoring_plan` (EU AI Act Article 72 plan → `post_market_monitoring_plan.json`) blocks. The optional blocks are declared in a pinned order (`anchors` → `annex_iv` → `post_market_monitoring_plan`) — manifest declaration order is the canonical/signed serialization order — so each version with its newest optional fields unpopulated is byte-identical to the prior version aside from `schema_version`.
 
 ### 6. Auditor verification recipe
 
-The README.txt embedded in the bundle spells out a 7-step recipe:
+The README.txt embedded in the bundle spells out a 10-step recipe:
 
 1. Untar the bundle.
 2. Verify `entries.ndjson` byte-hash matches `manifest.json`'s `ndjson_sha256`.
@@ -1383,8 +1396,11 @@ The README.txt embedded in the bundle spells out a 7-step recipe:
 5. Blank `manifest.signature` → `null`, re-serialize pretty-printed JSON, sha256.
 6. `ed25519_verify` the digest from step 5 against `manifest.sig` using the operator-published public key (`key_id` in `manifest.signature`).
 7. (Optional) For each entry in `manifest.parquet_pointers`, fetch `data_uri`, sha256, compare to `data_sha256`.
+8. (Optional) Verify `anchors.ndjson` byte-hash matches `manifest.anchors.sha256`, then verify each external timestamp token offline against the TSA's certificate.
+9. (Optional) Verify `annex_iv_documentation.json` byte-hash matches `manifest.annex_iv.sha256` (a coverage assertion, not a conformity declaration).
+10. (Optional) Verify `post_market_monitoring_plan.json` byte-hash matches `manifest.post_market_monitoring_plan.sha256`.
 
-Steps 1-3 are the chain-integrity check; steps 5-6 are the signature check; steps 4 and 7 cover the optional artifacts. Steps 2 + 3 alone establish the chain row data is authentic; step 6 adds non-repudiation against the signing key.
+Steps 1-3 are the chain-integrity check; steps 5-6 are the signature check; steps 4 and 7-10 cover the optional artifacts. Steps 2 + 3 alone establish the chain row data is authentic; step 6 adds non-repudiation against the signing key.
 
 ### 7. Operator-supplied prose
 
@@ -1456,7 +1472,7 @@ The catalog is the static source of truth in `clavenar-ledger/src/compliance.rs`
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | POST | `/compliance/evidence?from=…&to=…` (clavenar-ledger, **internal mTLS only**) | — | `application/json` (`ComplianceRegister`) |
-| POST | `/export/regulatory?…&include_compliance=true` (clavenar-ledger) | optional `text/markdown` | `.tar.gz` with embedded `compliance_register.json`, manifest v4 |
+| POST | `/export/regulatory?…&include_compliance=true[&annex_iv=true][&include_post_market_plan=true]` (clavenar-ledger) | optional `text/markdown` | `.tar.gz` with embedded `compliance_register.json` (+ optional `annex_iv_documentation.json` / `post_market_monitoring_plan.json`), manifest v6 |
 
 `/compliance/evidence` is the cheap live read the console `/compliance` page renders and re-polls. The `?include_compliance=true` flag on the existing bundle embeds the same register as a signed artifact (one signing path, one tamper-evident container) and widens `article_scope` to include Articles 14 + 15. Both go through one derivation function so the live view and the bundled artifact agree byte-for-byte for the same window. `/compliance/evidence` sits on the ledger's internal mTLS listener only (stripped from the plain `:8083` port exactly like `/export*`). Half-open window `[from, to)`; empty window → `200` with every control `no_data`; inverted/malformed window → `400`.
 
@@ -4069,6 +4085,31 @@ Brain verdicts are emitted by the proxy (the proxy publishes the
 forensic event after deriving the `authorized && policy_decision.allow`
 final verdict). If brain misbehaves, that's recoverable from the
 proxy-side forensic row. Brain itself is stateless.
+
+#### Reproducible evidence (EU AI Act Art 12)
+
+`InspectionResponse.evidence` records the verdict's **deterministic
+inputs**: the build (`brain_version`), `mock_mode`, the configured
+`provider:model` map, a SHA-256 per embedded system prompt, the
+embedding model, the drift threshold, the injection-heuristic level, a
+SHA-256 of the **PII-masked** normalized input, and whether the
+classifier verdict was `cache_served`. The proxy folds this onto the
+forensic event, where the ledger commits to it as a **chain v4 row**
+(`brain_evidence_sha256` is hashable; the canonical evidence JSON lives
+in `entry_payloads`, content-hashed — see [Layer 4](#layer-4--clavenar-ledger)).
+
+**Honest scope — what this is and is NOT.** The evidence captures the
+*inputs* to a verdict for Article 12 record-keeping; it is **not** a
+guarantee the verdict re-derives bit-for-bit. Hosted LLMs send no
+seed/temperature (the Anthropic Messages API has no seed), so replaying
+the same recorded inputs against the same model may yield a different
+sample — **only `mock_mode == true` verdicts are exactly reproducible**.
+The free-text `reason` remains a non-evidentiary annotation, and model
+strings are named aliases that can drift server-side. The recorded
+`normalized_input_sha256` is over the *masked* input (the raw payload
+is never fingerprinted into the regulator-shipped chain) and is absent
+on a cache hit; even so the verdict derived from the raw input, so the
+recorded fingerprint is a privacy-preserving proxy.
 
 #### Information disclosure
 

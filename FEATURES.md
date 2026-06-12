@@ -150,11 +150,11 @@ curl http://localhost:8083/verify
 
 Console `/audit` is the human-readable view; `clavenarctl regulatory export` produces the auditor-grade artifact.
 
-### 1.7 Three coexisting chain versions
+### 1.7 Four coexisting chain versions
 
-**Concept.** The hash chain has evolved three times. v1 was the original verdict-only shape. v2 added per-action cryptographic signatures (`agent_spiffe`, `signature`, `key_id`). v3 added lifecycle-event row anchoring (a different hashable shape entirely, keyed on `event_kind` + `payload_sha256`). All three coexist in the same SQLite table; the verifier dispatches per-row based on a version marker. This avoids retroactive re-signing — a row written under v1 verifies under v1 forever.
+**Concept.** The hash chain has evolved four times. v1 was the original verdict-only shape. v2 added per-action cryptographic signatures (`agent_spiffe`, `signature`, `key_id`). v3 added lifecycle-event row anchoring (a different hashable shape entirely, keyed on `event_kind` + `payload_sha256`). v4 added reproducible Brain-evidence verdict rows (EU AI Act Art 12): the v1 verdict shape plus a hashable `brain_evidence_sha256` content-hashing the Brain's deterministic inputs (the canonical evidence JSON rides `entry_payloads`). All four coexist in the same SQLite table; the verifier dispatches per-row based on a version marker. This avoids retroactive re-signing — a row written under v1 verifies under v1 forever. A v4 verdict row commits to the evidence in place of the v2 signature (the signature column still persists and stays JWKS-verifiable; Art 12 is record-keeping, not non-repudiation).
 
-**Implementation.** `CURRENT_CHAIN_VERSION = 3` constant in `clavenar-ledger`. `recompute_for_version` is the dispatch function; each version has its own `HashableEntryV<N>` struct. The field order **is** the chain version — reordering silently invalidates every existing entry, which is why CLAUDE.md flags the order as locked. Adding a new shape means adding `HashableEntryV<N>` + a new `recompute_for_version` arm, never editing older variants. An unknown version surfaces as the `unsupported_chain_version` signal.
+**Implementation.** `CURRENT_CHAIN_VERSION = 4` constant in `clavenar-ledger`. `recompute_for_version` is the dispatch function; each version has its own `HashableEntryV<N>` struct. The field order **is** the chain version — reordering silently invalidates every existing entry, which is why CLAUDE.md flags the order as locked. Adding a new shape means adding `HashableEntryV<N>` + a new `recompute_for_version` arm, never editing older variants. An unknown version surfaces as the `unsupported_chain_version` signal.
 
 **Verify.** Mixed v1/v2/v3 export verification:
 
@@ -230,7 +230,7 @@ curl http://localhost:8083/agents | jq .agents
 
 **Concept.** Until v0.5.0 the ledger was SQLite-only, which capped deployment to a single replica — concurrent writers on a shared PVC corrupt SQLite even with WAL, and SQLite's locking doesn't reach across hosts. The pluggable backend lifts that pin: Postgres mode lets N ledger replicas share one managed Postgres instance, with the `entries.seq UNIQUE` constraint serializing the chain append across pods. SQLite stays the default for single-node deployments and dev. **The chain hash is backend-agnostic** — byte-identical `entry_hash` values across SQLite and Postgres for the same `AppendRequest` sequence, enforced by a cross-backend equivalence test. A chain produced under one backend verifies under the other.
 
-**Implementation.** `LedgerStore` trait in `clavenar-ledger/src/storage.rs` covers every chain primitive — `append`, `latest_seed`, `read_for_agent` / `_paged` / `count`, `read_for_correlation`, `read_all`, `read_after_seq`, `list_audit_agent_ids`, `read_lifecycle_for_agent`, `read_payload`, `ping`. Two impls: `SqliteLedgerStore` (default, file-backed) and `PostgresLedgerStore` behind the `postgres` cargo feature (`tokio-postgres` + `deadpool-postgres`). `AppState.store: Arc<dyn LedgerStore>` is always set; `AppState.conn: Option<Arc<Mutex<Connection>>>` is populated only in SQLite mode so SQLite-shaped reporting queries (cold-tier export, regulatory bundle, Iceberg metadata, egress sweeper) keep their direct connection. Verify also flows through the trait — `verify_chain_via_store` mirrors per-row version dispatch + JWKS signature check + v3 payload integrity. Equivalence test at `tests/storage_equivalence.rs` feeds 16 deterministic fixtures (v1/v2/v3) through both backends and asserts byte-identical hashes.
+**Implementation.** `LedgerStore` trait in `clavenar-ledger/src/storage.rs` covers every chain primitive — `append`, `latest_seed`, `read_for_agent` / `_paged` / `count`, `read_for_correlation`, `read_all`, `read_after_seq`, `read_in_time_window`, `list_audit_agent_ids`, `read_lifecycle_for_agent`, `read_payload`, `ping`. Two impls: `SqliteLedgerStore` (default, file-backed) and `PostgresLedgerStore` behind the `postgres` cargo feature (`tokio-postgres` + `deadpool-postgres`). `AppState.store: Arc<dyn LedgerStore>` is always set; `AppState.conn: Option<Arc<Mutex<Connection>>>` is populated only in SQLite mode so the SQLite-only sidecars (cold-tier Parquet export, Iceberg metadata, anchor proofs, vacuum cursor, egress sweeper) keep their direct connection. The regulatory export + compliance-evidence **core** runs through the trait (windowed `read_in_time_window` + `verify_chain_via_store`), so those endpoints work on Postgres. Verify also flows through the trait — `verify_chain_via_store` mirrors per-row version dispatch + JWKS signature check + v3/v4 payload integrity. Equivalence test at `tests/storage_equivalence.rs` feeds 16 deterministic fixtures (v1/v2/v3/v4) through both backends and asserts byte-identical hashes.
 
 Backend select at boot:
 
@@ -240,7 +240,7 @@ CLAVENAR_LEDGER_PG_URL=postgres://...       # required when backend=postgres
 CLAVENAR_LEDGER_DB=/var/lib/clavenar/...      # sqlite-mode only
 ```
 
-Postgres mode disables the SQLite-only routes (`POST /export`, `GET /exports`, `POST /export/regulatory`, the egress sweeper) — they return `503 Service Unavailable` with a diagnostic. SIEM ingest in Postgres mode wires directly against the chain table; cold-tier export is the only feature that requires SQLite for now.
+Postgres mode disables the remaining SQLite-only routes (`POST /export`, `GET /exports`, the egress sweeper) — they return `503 Service Unavailable` with a diagnostic. `POST /export/regulatory` and `POST /compliance/evidence` now run on Postgres (their core — windowed read + trait verify + compliance register — is backend-agnostic; the bundle just omits the SQLite-only blocks). SIEM ingest in Postgres mode wires directly against the chain table; cold-tier Parquet export is the main feature that still requires SQLite.
 
 Helm wiring lives in `clavenar-e2e/charts/clavenar/values.yaml` — SQLite mode pinned to `replicas: 1`, Postgres mode lifts the pin. The "Postgres ledger mode" section of `clavenar-e2e/HA_RUNBOOK.md` documents the multi-replica deploy + the disabled-feature list.
 
@@ -1056,25 +1056,29 @@ clavenarctl regulatory export --from ... --to ... --output bundle.tar.gz
 tar -xzf bundle.tar.gz && cat README.txt    # 7-step recipe
 ```
 
-### 7.2 Manifest schema v3
+### 7.2 Manifest schema v6
 
-**Concept.** Self-describing. The manifest tells the auditor what's in the bundle and how to verify it. `chain_state` carries `prev_hash_at_window_start` and `entry_hash_at_window_end` so the auditor can verify chain continuity without fetching anything outside the bundle. `signature` is an envelope referencing the detached `manifest.sig` sidecar. Optional `technical_documentation` and `parquet_pointers` blocks are signed transitively (the signature commits to the canonical manifest).
+**Concept.** Self-describing. The manifest tells the auditor what's in the bundle and how to verify it. `chain_state` carries `prev_hash_at_window_start` and `entry_hash_at_window_end` so the auditor can verify chain continuity without fetching anything outside the bundle. `signature` is an envelope referencing the detached `manifest.sig` sidecar. Every optional block (`technical_documentation`, `parquet_pointers`, `compliance_register`, `anchors`, `annex_iv`, `post_market_monitoring_plan`) is signed transitively (the signature commits to the canonical manifest) and declared in a pinned order, so a bundle with a block unpopulated is byte-identical to the prior schema version apart from `schema_version`.
 
 **Implementation.** `Manifest` struct in `clavenar-ledger/src/regulatory.rs`. Fields:
 
 ```jsonc
 {
-  "schema_version": "3",
+  "schema_version": "6",
   "generated_at": "...",
   "window": { "from": "...", "to": "..." },
   "row_count": 1234,
   "seq_lo": 5000, "seq_hi": 6233,
   "chain_state": { "prev_hash_at_window_start": "...", "entry_hash_at_window_end": "..." },
   "ndjson_sha256": "...",
-  "article_scope": ["EU-AI-Act-Article-11", "EU-AI-Act-Article-12"],
+  "article_scope": ["EU-AI-Act-Article-11", "EU-AI-Act-Article-12"], // widened to 14/15/Annex-IV/72 by the optional blocks
   "signature": { "sidecar": "manifest.sig", "algorithm": "ed25519", "digest_alg": "sha256", "key_id": "...", "signed_at": "..." },
-  "technical_documentation": { "filename": "...", "sha256": "...", "byte_size": 2048 },
-  "parquet_pointers": [{ "snapshot_id": "...", "data_uri": "...", "data_sha256": "...", ... }]
+  "technical_documentation": { "filename": "...", "sha256": "...", "byte_size": 2048 },    // optional (v3)
+  "parquet_pointers": [{ "snapshot_id": "...", "data_uri": "...", "data_sha256": "...", ... }], // optional (v3)
+  "compliance_register": { "filename": "compliance_register.json", "sha256": "...", "byte_size": 4096 },    // optional (v4)
+  "anchors": { "filename": "anchors.ndjson", "sha256": "...", "byte_size": 2048, "count": 3 },               // optional (v5)
+  "annex_iv": { "filename": "annex_iv_documentation.json", "sha256": "...", "byte_size": 3072 },             // optional (v6)
+  "post_market_monitoring_plan": { "filename": "post_market_monitoring_plan.json", "sha256": "...", "byte_size": 2560 } // optional (v6)
 }
 ```
 
@@ -1154,7 +1158,7 @@ cat README.txt
 
 **Concept.** The Article 11/12 bundle covers documentation + logging. Articles 14 (human oversight) and 15 (accuracy / robustness / cybersecurity), plus the operational-monitoring controls auditors ask about under SOC 2 / ISO 27001, are *auto-derived from the chain* — no operator prose required. A live JSON register the operator renders at `/compliance` and downloads as a signed pack. It is evidence projection, not a legal conformity assessment, and says so on the wire.
 
-**Implementation.** Derivation engine in `clavenar-ledger/src/compliance.rs` — a static `CONTROL_CATALOG` of five seed controls (`EU-AI-Act-Article-14`, `-15`, `ISO-27001-8.13`, `SOC2-CC7.2`, `SOC2-CC7.3`), each a pure deriver over a chain slice. `POST /compliance/evidence?from=&to=` (internal mTLS listener) returns a `ComplianceRegister` JSON (schema v2: per-control `status` ∈ `satisfied`/`partial`/`no_data`, an auditable `metric` object, representative `sample_seqs`, and a narrative). `POST /export/regulatory?…&include_compliance=true` embeds the same register as `compliance_register.json` in the signed bundle (manifest **v4**, committed by sha256, `article_scope` widened to 14 + 15) — both go through one derivation function so the live view and the bundled artifact agree. Article 14 derives from HIL human decisions (`approver_assertion` / non-system `policy_decision.decided_by`) **and their channel provenance** — Satisfied demands every human decision rode an attested channel (`webauthn` / `oidc` / `saml`, stamped server-side by HIL from the verified principal); demo sessions, plain bearer stamps, and auth-disabled bypasses never count, system/auto decisions are excluded from the human count entirely, and the `provenance_summary` metric tags every decision channel so an auditor sees exactly what decided. Article 15 derives from deny-signal distribution + `verify_chain` pass + signed-denial coverage; ISO 8.13 from chain continuity + overlapping cold-tier exports. Mirror types in `clavenar-sdk` (`compliance_evidence`); console page `/compliance` (`clavenar-console/src/handlers/compliance.rs`); CLI flag `clavenarctl regulatory export --include-compliance`.
+**Implementation.** Derivation engine in `clavenar-ledger/src/compliance.rs` — a static `CONTROL_CATALOG` of five seed controls (`EU-AI-Act-Article-14`, `-15`, `ISO-27001-8.13`, `SOC2-CC7.2`, `SOC2-CC7.3`), each a pure deriver over a chain slice. `POST /compliance/evidence?from=&to=` (internal mTLS listener) returns a `ComplianceRegister` JSON (schema v2: per-control `status` ∈ `satisfied`/`partial`/`no_data`, an auditable `metric` object, representative `sample_seqs`, and a narrative). `POST /export/regulatory?…&include_compliance=true` embeds the same register as `compliance_register.json` in the signed bundle (manifest **v6**, committed by sha256, `article_scope` widened to 14 + 15) — both go through one derivation function so the live view and the bundled artifact agree. The derivation is backend-agnostic (it runs through the `LedgerStore` trait), so `/compliance/evidence` and the bundled register work on Postgres too. Article 14 derives from HIL human decisions (`approver_assertion` / non-system `policy_decision.decided_by`) **and their channel provenance** — Satisfied demands every human decision rode an attested channel (`webauthn` / `oidc` / `saml`, stamped server-side by HIL from the verified principal); demo sessions, plain bearer stamps, and auth-disabled bypasses never count, system/auto decisions are excluded from the human count entirely, and the `provenance_summary` metric tags every decision channel so an auditor sees exactly what decided. Article 15 derives from deny-signal distribution + `verify_chain` pass + signed-denial coverage; ISO 8.13 from chain continuity + overlapping cold-tier exports. Mirror types in `clavenar-sdk` (`compliance_evidence`); console page `/compliance` (`clavenar-console/src/handlers/compliance.rs`); CLI flag `clavenarctl regulatory export --include-compliance`.
 
 **Verify.**
 
@@ -1163,7 +1167,7 @@ cat README.txt
 clavenarctl regulatory export --from <RFC3339> --to <RFC3339> \
   --include-compliance --output pack.tar.gz
 tar -xzf pack.tar.gz && cat clavenar-regulatory-bundle-*/compliance_register.json
-# manifest.json: schema_version "4", article_scope includes 14 + 15
+# manifest.json: schema_version "6", article_scope includes 14 + 15
 ```
 
 ---
@@ -1745,7 +1749,7 @@ curl -X POST http://localhost:8081/inspect -H 'content-type: application/json' \
 
 **Concept.** The console's `/policies` write surface (§4.10) and the `clavenarctl` policy commands talk to `clavenar-policy-engine`'s mutation API; mutations anchor in chain v3 via the policy-engine outbox.
 
-**Wire.** Endpoints listed in §1.9. Optimistic-concurrency body: `{reason: string, expected_current_version: int}`. Conflict response: `409 policy_version_conflict` with the new metadata so the UI can prompt-and-reload. Authz: every `POST/PUT/DELETE` requires `Role::Admin`. `policy.*` event kinds dispatch to chain v3 — no v4 bump (the chain is event-kind-polymorphic).
+**Wire.** Endpoints listed in §1.9. Optimistic-concurrency body: `{reason: string, expected_current_version: int}`. Conflict response: `409 policy_version_conflict` with the new metadata so the UI can prompt-and-reload. Authz: every `POST/PUT/DELETE` requires `Role::Admin`. `policy.*` event kinds dispatch to chain v3 — no new chain version needed (the chain is event-kind-polymorphic).
 
 **Verify.** See §1.9, §11.7.
 
