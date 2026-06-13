@@ -4244,7 +4244,8 @@ a single `LlmProvider` trait whose `(provider, model)` pairs come from
 Vertex, or Ollama, mixed per detector. Claude Haiku 4.5 ships as the
 default for every inspector call; nothing below is hardcoded to it.
 The signals: intent classifier (inspector LLM), persona drift (numeric
-Voyage cosine, not an LLM call), indirect-injection scanner (inspector
+Voyage cosine, not an LLM call — paired with a structural
+sequence-escalation axis, below), indirect-injection scanner (inspector
 LLM + heuristic), malicious-code detector (inspector LLM + regex; gated
 on the write-shape method set so it only fires on file-content writes),
 and compromised-package detector (bundled-list exact match + inspector-LLM
@@ -4253,6 +4254,26 @@ prefix regex). The last two land verdicts via the same `intent_category`
 + `authorized` axes as the classifier — no schema change. Bundled list
 lives in `clavenar-brain/data/compromised_packages.json` and refreshes
 weekly via an OSV.dev cron PR.
+
+**Multi-turn window.** The proxy threads a bounded `prior_requests`
+window (recent method/tool tuples from its `HistoryStore`; additive
+`#[serde(default)]`, excluded from the verdict cache key so the cached
+classifier stays history-independent) into each `/inspect`. Two
+detectors consume it. The injection scanner prepends a recent-sequence
+summary to its prompt. The **sequence-escalation** signal
+(`sequence_escalation_score`, block threshold
+`SEQUENCE_ESCALATION_BLOCK_THRESHOLD = 0.7`) folds the verdict to
+`authorized = false` when a *novel* high-blast-radius tool (write / exec
+/ bulk-exfil shape) follows a benign-read window — the rapport-then-strike
+shape a single-request detector cannot see. It is a second drift axis,
+distinct from persona drift: purely structural (method/tool shape only,
+never an embedding and never prior-request `intent` — the proxy records
+none), so it fires in mock mode where the chaos catalog and simulator
+run. Yellow-tier tools are deliberately out of scope — they route to HIL
+on every call regardless of sequence, so escalation there would be
+redundant, and because a folded deny is never forwarded (and so never
+recorded into the window) it would otherwise re-fire perpetually and
+starve the approval queue.
 
 #### Spoofing & Tampering
 
