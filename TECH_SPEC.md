@@ -484,6 +484,7 @@ All endpoints below take `Authorization: Bearer <oidc_id_token>`. `clavenar-iden
 |---|---|---|---|
 | `POST` | `/agents` | `agents:create` | `agent.registered` |
 | `GET` | `/agents` | any tenant member | — |
+| `GET` | `/agents/orphans` | any tenant member | — |
 | `GET` | `/agents/{id}` | any tenant member | — |
 | `POST` | `/agents/{id}/suspend` | owner-team or `agents:admin` | `agent.suspended` |
 | `POST` | `/agents/{id}/unsuspend` | `agents:admin` | `agent.unsuspended` |
@@ -693,8 +694,13 @@ clavenarctl agents certify <id> --tenant acme \
   --sdk-version 1.0.0 [--out support-bot-3.cert.json]
 
 clavenarctl agents migrate \
-  --identity-db /var/lib/clavenar-identity/identity.sqlite \
-  [--dry-run] [--default-owner-team unassigned] [--default-envelope '*'] [--default-attestation-kinds '*']
+  --names legacy-fleet.txt --default-owner-team legacy-fleet [--dry-run]
+
+clavenarctl agents bootstrap [--tenant acme]            # guided first-agent wizard
+clavenarctl agents import-from-scanner report.json -o names.txt
+clavenarctl agents import-from-workloads spire-entries.json [-o names.txt]
+clavenarctl agents import-from-workloads --from-identity --enroll \
+  --default-owner-team legacy-fleet [--dry-run]
 ```
 
 #### 9.3 Conventions
@@ -712,6 +718,17 @@ On an all-deny run, ctl submits the result to `POST /agents/{id}/certification` 
 The **`CLAVENAR_IDENTITY_CERTIFICATION_MODE`** gate at `/svid` issuance is `off | flag | enforce`, defaulting `off` (the inverse of `REGISTRATION_MODE`): `flag` lets an uncertified agent mint with an `uncertified_agent` forensic signal; `enforce` rejects issuance for an agent whose `certified_at` is null (`403 uncertified_agent`). The gate is independent of the registration gate and applies only to an existing record (you must register before you can certify).
 
 **Honest scope:** certification proves the *enforcement boundary* held for a given SDK version — that every agent-targeted probe was denied at the proxy. It does **not** prove the agent's private code is correct; the catalog observes only the proxy verdict, never the agent's internal handling. The `sdk_version` is operator-asserted (there is no wire source for an agent's running version), so the certificate is identity-self-attested, not third-party-audited.
+
+#### 9.5 Onboarding funnel — discovery → enrollment
+
+The funnel turns "I have a fleet of unmanaged workloads" into registered agents without hand-curating a names list:
+
+- **`agents bootstrap`** — interactive wizard for greenfield operators: prompts tenant / name / owner-team / envelope template (`minimal` | `read-only` | `read-write` | `custom`) / description, shows a summary, and registers idempotently (a matching re-run is a no-op; a drift surfaces a 4-conflict). Refuses a non-interactive stdin and points the caller at `agents create`.
+- **`agents import-from-scanner <report.json>`** — slugifies a `clavenar-shadow-scanner --json` report's finding locations into candidate agent names (`scanner-<slug>`), `--min-severity` floor, → a names file for `migrate`.
+- **`agents import-from-workloads <source>`** — three discovery sources: a SPIRE `entry show -output json` file, a flat list of `spiffe://…` IDs/paths/names, or `--from-identity` (pulls `GET /agents/orphans`). Each SPIFFE id resolves to a candidate name (clavenar `…/agent/<name>/…`, SPIRE k8s `…/ns/<ns>/sa/<sa>` → `<ns>-<sa>`, else the slugified last segment); a clavenar-shaped path naming a different tenant is skipped. Default writes a names file (review-first); `--enroll --default-owner-team <t>` registers the unenrolled names directly with a default envelope, reusing `migrate`'s idempotent register-if-absent engine (same `system:migration:<sub>` attribution, same `created`/`matched`/`drift` outcomes).
+- **`GET /agents/orphans?tenant=<t>`** (identity, any tenant member) — the workload-discovery feed: distinct `agent_name`s that minted an SVID (`svids` log) but have no `agents` row (`{agent_name, last_seen, svid_count}`). A decommissioned name still has a registry row, so it is **not** an orphan; the feed is exactly the registration gap.
+
+All three import paths share `migrate`'s exit codes and `--dry-run`/`--json`; the discovery sources are independent, so an operator mixes scanner findings, SPIRE entries, and the identity feed into one enrollment pass.
 
 ### 10. Console (`clavenar-console`) extensions
 
